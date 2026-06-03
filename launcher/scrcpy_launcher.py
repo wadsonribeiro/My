@@ -5,7 +5,7 @@ import threading
 import os, sys, json, re, time
 
 # ─── Configuração ─────────────────────────────────────────────
-SCRCPY_EXE = "scrcpy.exe"
+SCRCPY_EXE = "base"           # renomeado de scrcpy.exe
 ADB_EXE    = "adb.exe"
 WIFI_PORT  = 9990
 DATA_FILE  = "devices_data.json"
@@ -23,22 +23,11 @@ ADB       = os.path.join(BASE_DIR, ADB_EXE)
 DATA_PATH = os.path.join(BASE_DIR, DATA_FILE)
 
 # ─── JSON ─────────────────────────────────────────────────────
-# Estrutura:
-# {
-#   "<usb_serial>": {
-#     "name": "Meu Celular",
-#     "wifi_serial": "192.168.1.10:9990",
-#     "_modelo": "M2102J20SG"
-#   }
-# }
-# REGRA: só seriais USB como chave. IPs nunca são chave.
-
 def load_data():
     if os.path.exists(DATA_PATH):
         try:
             with open(DATA_PATH, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            # Remove entradas antigas com IP como chave (migração)
             return {k: v for k, v in raw.items() if not is_wifi_serial(k)}
         except:
             pass
@@ -97,16 +86,8 @@ def fetch_raw_devices():
 
 # ─── Agrupamento ──────────────────────────────────────────────
 def build_groups(raw_devs, data):
-    """
-    REGRAS PRINCIPAIS:
-    1. Só aparece na tela se o serial USB estiver registrado no data
-       (foi visto ao menos uma vez conectado via USB).
-    2. Wi-Fi serial órfão (sem USB dono no data) é COMPLETAMENTE ignorado.
-    3. Grupo só exibido se usb_on OR wifi_on.
-    """
     usb_map  = {}
     wifi_map = {}
-
     for d in raw_devs:
         if is_wifi_serial(d["serial"]):
             wifi_map[d["serial"]] = d
@@ -114,8 +95,6 @@ def build_groups(raw_devs, data):
             usb_map[d["serial"]] = d
 
     groups = []
-
-    # Itera apenas pelos USB seriais que estão NO data (já foram registrados)
     for usb_serial, entry in data.items():
         usb_d   = usb_map.get(usb_serial)
         usb_on  = usb_d is not None and usb_d["status"] == "device"
@@ -127,7 +106,6 @@ def build_groups(raw_devs, data):
             wd      = wifi_map.get(wifi_serial)
             wifi_on = wd is not None and wd["status"] != "offline"
 
-        # Só exibe se pelo menos um ON
         if not usb_on and not wifi_on:
             continue
 
@@ -140,10 +118,6 @@ def build_groups(raw_devs, data):
             "modelo":      modelo,
         })
 
-    # Dispositivos USB novos (ainda não no data) — registra mas não exibe ainda
-    # (aparecerão no próximo ciclo após o IP ser salvo)
-    # Nada a fazer aqui: o _fetch cuida do registro.
-
     return groups
 
 
@@ -151,7 +125,7 @@ def build_groups(raw_devs, data):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SCRCPY Launcher")
+        self.title("My Android")
         self.geometry("540x440")
         self.resizable(False, False)
         self.configure(bg="#1e1e1e")
@@ -164,7 +138,7 @@ class App(tk.Tk):
     def _build_ui(self):
         hdr = tk.Frame(self, bg="#111111", pady=12)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="SCRCPY Launcher",
+        tk.Label(hdr, text="My Android",
                  font=("Segoe UI", 16, "bold"),
                  bg="#111111", fg="#ffffff").pack()
         tk.Label(hdr, text="Dispositivos detectados automaticamente",
@@ -192,29 +166,23 @@ class App(tk.Tk):
             if is_wifi_serial(d["serial"]): continue
             if d["status"] != "device": continue
             usb = d["serial"]
-
-            ip = get_ip_from_device(usb)
+            ip  = get_ip_from_device(usb)
             if not ip: continue
 
             new_wifi = f"{ip}:{WIFI_PORT}"
             entry    = self.data.setdefault(usb, {})
             old_wifi = entry.get("wifi_serial")
-
-            # Salva modelo
             entry["_modelo"] = d["modelo"]
 
             if old_wifi != new_wifi:
-                # IP mudou — primeiro atualiza o data ANTES de qualquer outra coisa
                 if old_wifi:
                     run_adb("disconnect", old_wifi)
                 entry["wifi_serial"] = new_wifi
                 save_data(self.data)
-                # Só depois conecta o novo
                 run_adb("-s", usb, "tcpip", str(WIFI_PORT))
                 time.sleep(0.6)
                 run_adb("connect", new_wifi)
             else:
-                # Mesmo IP — garante conectado
                 run_adb("connect", new_wifi)
 
         groups = build_groups(raw, self.data)
@@ -286,12 +254,22 @@ class App(tk.Tk):
 
         modo_var = tk.StringVar(value="usb")
 
-        btn_modo = tk.Button(right, text="USB",
-                             font=("Segoe UI", 8, "bold"),
-                             bg="#2a2a2a", fg="#555555",
-                             relief="flat", padx=8, pady=5,
-                             state="disabled")
-        btn_modo.pack(side="left", padx=(0, 4))
+        # Badge de tipo de conexão ativa (USB / WI-FI)
+        lbl_conn = tk.Label(right, text="USB",
+                            font=("Segoe UI", 8, "bold"),
+                            bg="#1a3a1a", fg="#4caf50",
+                            padx=8, pady=4, anchor="center")
+        lbl_conn.pack(side="left", padx=(0, 4))
+
+        # Botão gaveta (só aparece quando ambos ON)
+        btn_modo = tk.Button(right, text="▾",
+                             font=("Segoe UI", 9, "bold"),
+                             bg="#333333", fg="#aaaaaa",
+                             activebackground="#444444",
+                             activeforeground="#ffffff",
+                             relief="flat", cursor="hand2",
+                             padx=6, pady=5)
+        # Não empacota ainda — só mostra quando gaveta disponível
 
         btn_conectar = tk.Button(right, text="Conectar",
                                  font=("Segoe UI", 9, "bold"),
@@ -305,8 +283,10 @@ class App(tk.Tk):
         self._rows[key] = {
             "frame": frame, "lbl_nome": lbl_nome,
             "lbl_usb": lbl_usb, "lbl_wifi": lbl_wifi,
+            "lbl_conn": lbl_conn,
             "btn_modo": btn_modo, "btn_conectar": btn_conectar,
             "modo_var": modo_var, "modelo": modelo, "g": g,
+            "gaveta_visivel": False,
         }
 
         btn_modo.config(command=lambda k=key: self._abrir_menu(k))
@@ -319,6 +299,7 @@ class App(tk.Tk):
         if not row: return
         row["g"] = g
 
+        # Labels de serial
         if g["usb_serial"]:
             cor = "#4caf50" if g["usb_on"] else "#666666"
             row["lbl_usb"].config(
@@ -339,33 +320,45 @@ class App(tk.Tk):
         wifi_on = g["wifi_on"]
         modo    = row["modo_var"].get()
 
+        # Ajuste automático de modo
         if modo == "usb" and not usb_on and wifi_on:
             modo = "wifi"; row["modo_var"].set("wifi")
         elif modo == "wifi" and not wifi_on and usb_on:
             modo = "usb";  row["modo_var"].set("usb")
 
-        btn = row["btn_modo"]
-        if usb_on and wifi_on:
-            lbl = "USB ▾" if modo == "usb" else "Wi-Fi ▾"
-            btn.config(text=lbl, state="normal", cursor="hand2",
-                       fg="#aaaaaa", bg="#333333",
-                       activebackground="#444444",
-                       activeforeground="#ffffff")
-        elif usb_on:
-            btn.config(text="USB", state="disabled",
-                       cursor="", fg="#555555", bg="#2a2a2a")
-            row["modo_var"].set("usb"); modo = "usb"
-        else:
-            btn.config(text="Wi-Fi", state="disabled",
-                       cursor="", fg="#555555", bg="#2a2a2a")
-            row["modo_var"].set("wifi"); modo = "wifi"
-
+        # ── Badge de conexão ativa ──
+        lbl_conn = row["lbl_conn"]
         if modo == "wifi":
+            lbl_conn.config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
             row["btn_conectar"].config(bg="#00796b",
                                        activebackground="#00695c")
         else:
+            lbl_conn.config(text="USB", bg="#1a3a1a", fg="#4caf50")
             row["btn_conectar"].config(bg="#1976d2",
                                        activebackground="#1565c0")
+
+        # ── Botão gaveta: só aparece se ambos ON ──
+        btn_modo = row["btn_modo"]
+        if usb_on and wifi_on:
+            if not row["gaveta_visivel"]:
+                btn_modo.pack(side="left", padx=(0, 4),
+                              before=row["btn_conectar"])
+                row["gaveta_visivel"] = True
+        else:
+            if row["gaveta_visivel"]:
+                btn_modo.pack_forget()
+                row["gaveta_visivel"] = False
+            # Força modo correto quando só um disponível
+            if usb_on:
+                row["modo_var"].set("usb"); modo = "usb"
+                lbl_conn.config(text="USB", bg="#1a3a1a", fg="#4caf50")
+                row["btn_conectar"].config(bg="#1976d2",
+                                           activebackground="#1565c0")
+            else:
+                row["modo_var"].set("wifi"); modo = "wifi"
+                lbl_conn.config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
+                row["btn_conectar"].config(bg="#00796b",
+                                           activebackground="#00695c")
 
     # ── Menu gaveta ───────────────────────────────────────────
     def _abrir_menu(self, key):
@@ -381,13 +374,13 @@ class App(tk.Tk):
 
         def set_usb():
             row["modo_var"].set("usb")
-            row["btn_modo"].config(text="USB ▾")
+            row["lbl_conn"].config(text="USB", bg="#1a3a1a", fg="#4caf50")
             row["btn_conectar"].config(bg="#1976d2",
                                        activebackground="#1565c0")
 
         def set_wifi():
             row["modo_var"].set("wifi")
-            row["btn_modo"].config(text="Wi-Fi ▾")
+            row["lbl_conn"].config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
             row["btn_conectar"].config(bg="#00796b",
                                        activebackground="#00695c")
 
@@ -421,15 +414,17 @@ class App(tk.Tk):
                     self.after(0, messagebox.showerror, "Erro",
                                "Serial não disponível.")
                     return
+                # Título mostra o tipo de conexão
+                tipo = "WI-FI" if modo == "wifi" else "USB"
                 subprocess.Popen(
                     [SCRCPY, "-s", target,
-                     "--window-title", f"USB - {nome}"],
+                     "--window-title", f"{tipo} - {nome}"],
                     cwd=BASE_DIR,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
             except FileNotFoundError:
                 self.after(0, messagebox.showerror, "Erro",
-                           f"scrcpy.exe não encontrado em:\n{SCRCPY}")
+                           f"Arquivo 'base' não encontrado em:\n{BASE_DIR}")
             finally:
                 self.after(600, lambda: btn.config(
                     state="normal", text="Conectar"))
