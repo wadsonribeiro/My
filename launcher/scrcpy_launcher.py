@@ -416,10 +416,13 @@ class App(tk.Tk):
                     return
                 # Título mostra o tipo de conexão
                 tipo = "WI-FI" if modo == "wifi" else "USB"
+                env = os.environ.copy()
+                env["SCRCPY_SERVER_PATH"] = os.path.join(BASE_DIR, "server")
                 subprocess.Popen(
                     [SCRCPY, "-s", target,
                      "--window-title", f"{tipo} - {nome}"],
                     cwd=BASE_DIR,
+                    env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
             except FileNotFoundError:
