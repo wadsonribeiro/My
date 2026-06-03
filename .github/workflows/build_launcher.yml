@@ -1,0 +1,30 @@
+name: Build Launcher EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-launcher:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar PyInstaller
+        run: pip install pyinstaller
+
+      - name: Compilar launcher em EXE
+        run: |
+          pyinstaller --onefile --noconsole --name "scrcpy-launcher" launcher/scrcpy_launcher.py
+
+      - name: Upload do EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-launcher-exe
+          path: dist/scrcpy-launcher.exe
+          retention-days: 30
