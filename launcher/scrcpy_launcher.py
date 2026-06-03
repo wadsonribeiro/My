@@ -4,13 +4,13 @@ import subprocess
 import threading
 import os, sys, json, re, time
 
-# ─── Configuração ────────────────────────────────────────────
+# ─── Configuração ─────────────────────────────────────────────
 SCRCPY_EXE = "scrcpy.exe"
 ADB_EXE    = "adb.exe"
 WIFI_PORT  = 9990
 DATA_FILE  = "devices_data.json"
 POLL_MS    = 2500
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -22,12 +22,26 @@ SCRCPY    = os.path.join(BASE_DIR, SCRCPY_EXE)
 ADB       = os.path.join(BASE_DIR, ADB_EXE)
 DATA_PATH = os.path.join(BASE_DIR, DATA_FILE)
 
-# ─── Persistência ─────────────────────────────────────────────
+# ─── Estrutura do JSON ────────────────────────────────────────
+# {
+#   "8a20a960": {
+#     "wifi_serial": "192.168.18.61:9990",
+#     "name": "POCO X3 PRO"
+#   }
+# }
+# Chave = serial USB. Nunca IPs como chave.
+
 def load_data():
     if os.path.exists(DATA_PATH):
         try:
             with open(DATA_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw = json.load(f)
+            # Migração: remove entradas antigas que são IPs como chave
+            clean = {}
+            for k, v in raw.items():
+                if not is_wifi_serial(k):
+                    clean[k] = v
+            return clean
         except:
             pass
     return {}
@@ -63,11 +77,8 @@ def get_ip_from_device(serial):
     if m: return m.group(1)
     return None
 
-def fetch_all_devices():
-    """
-    Retorna lista de raw devices do adb devices -l
-    Formato: [{"serial": ..., "modelo": ..., "status": ...}]
-    """
+def fetch_raw_devices():
+    """Retorna todos os dispositivos do adb devices -l."""
     out = run_adb("devices", "-l")
     devs = []
     for linha in out.splitlines()[1:]:
@@ -87,71 +98,83 @@ def fetch_all_devices():
         devs.append({"serial": serial, "modelo": modelo, "status": status})
     return devs
 
-def group_devices(raw_devs, data):
+def build_groups(raw_devs, data):
     """
-    Agrupa dispositivos USB + Wi-Fi do mesmo aparelho.
-    Usa devices_data.json para saber qual IP pertence a qual serial USB.
+    Agrupa dispositivos em grupos únicos por serial USB.
 
-    Retorna lista de grupos:
+    Retorna lista de:
     {
-      "id":       serial USB (ou IP se só Wi-Fi),
-      "modelo":   str,
-      "usb_serial":  str | None,
-      "usb_on":      bool,
-      "wifi_serial": str | None,   (ex: "192.168.18.61:9990")
-      "wifi_on":     bool,
+      "usb_serial":   str | None,
+      "usb_on":       bool,
+      "wifi_serial":  str | None,   ex: "192.168.18.61:9990"
+      "wifi_on":      bool,
+      "modelo":       str,
+      "key":          str,  # chave única (usb_serial ou wifi_serial)
     }
+    Só inclui grupos onde pelo menos um dos seriais está ON.
     """
-    usb_devs  = {d["serial"]: d for d in raw_devs if not is_wifi_serial(d["serial"])}
-    wifi_devs = {d["serial"]: d for d in raw_devs if  is_wifi_serial(d["serial"])}
+    usb_map  = {}   # serial → {modelo, status}
+    wifi_set = {}   # serial → status
 
-    groups = {}
+    for d in raw_devs:
+        if is_wifi_serial(d["serial"]):
+            wifi_set[d["serial"]] = d["status"]
+        else:
+            usb_map[d["serial"]] = d
 
-    # Processa USB primeiro
-    for serial, d in usb_devs.items():
-        ip = data.get(serial, {}).get("ip", "")
-        wifi_serial = f"{ip}:{WIFI_PORT}" if ip else None
-        wifi_on = wifi_serial in wifi_devs and wifi_devs[wifi_serial]["status"] != "offline"
+    groups = []
+    used_wifi = set()
 
-        groups[serial] = {
-            "id":          serial,
-            "modelo":      d["modelo"],
-            "usb_serial":  serial,
-            "usb_on":      d["status"] == "device",
-            "wifi_serial": wifi_serial,
-            "wifi_on":     wifi_on,
-        }
-        # Marca esse wi-fi como "consumido"
-        if wifi_serial and wifi_serial in wifi_devs:
-            wifi_devs[wifi_serial]["_consumed"] = True
+    # Grupos com USB
+    for usb_serial, d in usb_map.items():
+        usb_on = d["status"] == "device"
+        # Pega wifi_serial salvo no data
+        wifi_serial = data.get(usb_serial, {}).get("wifi_serial")
+        wifi_on = False
+        if wifi_serial:
+            ws = wifi_set.get(wifi_serial, "offline")
+            wifi_on = (ws != "offline")
+            used_wifi.add(wifi_serial)
 
-    # Wi-Fi não vinculado a nenhum USB conhecido
-    for serial, d in wifi_devs.items():
-        if d.get("_consumed"): continue
-        # Tenta achar no data pelo IP
-        ip_part = serial.rsplit(":", 1)[0]
+        # Só exibe se pelo menos um ON
+        if not usb_on and not wifi_on:
+            continue
+
+        groups.append({
+            "key":          usb_serial,
+            "usb_serial":   usb_serial,
+            "usb_on":       usb_on,
+            "wifi_serial":  wifi_serial,
+            "wifi_on":      wifi_on,
+            "modelo":       d["modelo"],
+        })
+
+    # Grupos só Wi-Fi (USB desconectado, mas Wi-Fi ainda ativo)
+    for wifi_serial, ws in wifi_set.items():
+        if wifi_serial in used_wifi: continue
+        wifi_on = ws != "offline"
+        if not wifi_on: continue
+
+        # Tenta achar o USB dono pelo data
         usb_owner = None
         for uid, udata in data.items():
-            if udata.get("ip") == ip_part:
+            if udata.get("wifi_serial") == wifi_serial:
                 usb_owner = uid
                 break
-        if usb_owner and usb_owner in groups:
-            # Atualiza grupo existente
-            groups[usb_owner]["wifi_serial"] = serial
-            groups[usb_owner]["wifi_on"] = d["status"] != "offline"
-        else:
-            # Dispositivo só Wi-Fi (USB foi desconectado)
-            nome = data.get(usb_owner or serial, {}).get("name", d["modelo"])
-            groups[serial] = {
-                "id":          usb_owner or serial,
-                "modelo":      d["modelo"],
-                "usb_serial":  None,
-                "usb_on":      False,
-                "wifi_serial": serial,
-                "wifi_on":     d["status"] != "offline",
-            }
 
-    return list(groups.values())
+        key    = usb_owner if usb_owner else wifi_serial
+        modelo = data.get(usb_owner or "", {}).get("_modelo", wifi_serial)
+
+        groups.append({
+            "key":         key,
+            "usb_serial":  usb_owner,
+            "usb_on":      False,
+            "wifi_serial": wifi_serial,
+            "wifi_on":     True,
+            "modelo":      modelo,
+        })
+
+    return groups
 
 
 # ─── App ──────────────────────────────────────────────────────
@@ -163,7 +186,7 @@ class App(tk.Tk):
         self.resizable(False, False)
         self.configure(bg="#1e1e1e")
         self.data = load_data()
-        self._rows = {}          # group_id → widgets
+        self._rows    = {}       # key → widgets
         self._polling = True
         self._build_ui()
         self._poll()
@@ -187,60 +210,65 @@ class App(tk.Tk):
                                    bg="#1a1a1a", fg="#444444")
         self.lbl_status.pack(side="left", padx=16)
 
-    # ── Polling ──────────────────────────────────────────────
+    # ── Polling ───────────────────────────────────────────────
     def _poll(self):
         if not self._polling: return
         threading.Thread(target=self._fetch, daemon=True).start()
 
     def _fetch(self):
-        raw   = fetch_all_devices()
-        # Atualiza IPs de dispositivos USB em background
-        for d in raw:
-            if not is_wifi_serial(d["serial"]) and d["status"] == "device":
-                ip = get_ip_from_device(d["serial"])
-                if ip:
-                    entry = self.data.setdefault(d["serial"], {})
-                    if entry.get("ip") != ip:
-                        entry["ip"] = ip
-                        save_data(self.data)
-                        # Conecta automaticamente ao Wi-Fi para deixar o serial disponível
-                        wifi_serial = f"{ip}:{WIFI_PORT}"
-                        run_adb("-s", d["serial"], "tcpip", str(WIFI_PORT))
-                        time.sleep(0.5)
-                        run_adb("connect", wifi_serial)
+        raw = fetch_raw_devices()
 
-        groups = group_devices(raw, self.data)
+        # Para cada USB ON: pega IP, salva wifi_serial e conecta tcpip
+        for d in raw:
+            if is_wifi_serial(d["serial"]): continue
+            if d["status"] != "device": continue
+            usb = d["serial"]
+            ip = get_ip_from_device(usb)
+            if not ip: continue
+            wifi_serial = f"{ip}:{WIFI_PORT}"
+            entry = self.data.setdefault(usb, {})
+            # Salva modelo para uso quando USB sumir
+            entry["_modelo"] = d["modelo"]
+            if entry.get("wifi_serial") != wifi_serial:
+                entry["wifi_serial"] = wifi_serial
+                save_data(self.data)
+                # Abre porta tcpip e conecta
+                run_adb("-s", usb, "tcpip", str(WIFI_PORT))
+                time.sleep(0.6)
+                run_adb("connect", wifi_serial)
+
+        groups = build_groups(raw, self.data)
         self.after(0, self._update_ui, groups)
 
     def _update_ui(self, groups):
-        ids_now = {g["id"] for g in groups}
+        keys_now = {g["key"] for g in groups}
 
-        # Remove rows ausentes
-        for gid in list(self._rows.keys()):
-            if gid not in ids_now:
-                self._rows[gid]["frame"].destroy()
-                del self._rows[gid]
+        # Remove rows que saíram
+        for k in list(self._rows.keys()):
+            if k not in keys_now:
+                self._rows[k]["frame"].destroy()
+                del self._rows[k]
 
         # Adiciona ou atualiza
         for g in groups:
-            if g["id"] not in self._rows:
+            if g["key"] not in self._rows:
                 self._build_row(g)
             else:
                 self._update_row(g)
 
         n = len(groups)
         self.lbl_status.config(
-            text=f"{n} dispositivo{'s' if n!=1 else ''} encontrado{'s' if n!=1 else ''}" if n
-                 else "Nenhum dispositivo conectado")
+            text=(f"{n} dispositivo{'s' if n!=1 else ''} encontrado{'s' if n!=1 else ''}"
+                  if n else "Nenhum dispositivo conectado"))
 
         self.after(POLL_MS, self._poll)
 
-    # ── Row ──────────────────────────────────────────────────
-    def _get_name(self, gid, modelo):
-        return self.data.get(gid, {}).get("name", modelo)
+    # ── Row ───────────────────────────────────────────────────
+    def _get_name(self, key, modelo):
+        return self.data.get(key, {}).get("name", modelo)
 
     def _build_row(self, g):
-        gid    = g["id"]
+        key    = g["key"]
         modelo = g["modelo"]
 
         frame = tk.Frame(self.frame_lista, bg="#2a2a2a",
@@ -249,7 +277,7 @@ class App(tk.Tk):
                          highlightthickness=1)
         frame.pack(fill="x", pady=3)
 
-        # ── Esquerda: ícone + info ──
+        # Esquerda
         left = tk.Frame(frame, bg="#2a2a2a")
         left.pack(side="left", fill="x", expand=True)
 
@@ -259,14 +287,14 @@ class App(tk.Tk):
         info = tk.Frame(left, bg="#2a2a2a")
         info.pack(side="left")
 
-        nome = self._get_name(gid, modelo)
+        nome = self._get_name(key, modelo)
         lbl_nome = tk.Label(info, text=nome,
                             font=("Segoe UI", 11, "bold"),
                             bg="#2a2a2a", fg="#ffffff",
                             cursor="hand2", anchor="w")
         lbl_nome.pack(anchor="w")
         lbl_nome.bind("<Button-1>",
-                      lambda e, gi=gid, mo=modelo: self._editar_nome(gi, mo))
+                      lambda e, k=key, m=modelo: self._editar_nome(k, m))
 
         lbl_usb = tk.Label(info, text="", font=("Segoe UI", 8),
                            bg="#2a2a2a", anchor="w")
@@ -276,21 +304,17 @@ class App(tk.Tk):
                             bg="#2a2a2a", anchor="w")
         lbl_wifi.pack(anchor="w")
 
-        # ── Direita: gaveta + conectar ──
+        # Direita
         right = tk.Frame(frame, bg="#2a2a2a")
         right.pack(side="right", anchor="center")
 
-        # Modo selecionado: "usb" ou "wifi"
         modo_var = tk.StringVar(value="usb")
 
-        # Botão de modo (mostra o modo atual, clique abre menu)
-        btn_modo = tk.Button(right, text="USB ▾",
+        btn_modo = tk.Button(right, text="USB",
                              font=("Segoe UI", 8, "bold"),
-                             bg="#333333", fg="#aaaaaa",
-                             activebackground="#444444",
-                             activeforeground="#ffffff",
-                             relief="flat", cursor="hand2",
-                             padx=8, pady=5)
+                             bg="#2a2a2a", fg="#555555",
+                             relief="flat", padx=8, pady=5,
+                             state="disabled")
         btn_modo.pack(side="left", padx=(0, 4))
 
         btn_conectar = tk.Button(right, text="Conectar",
@@ -302,65 +326,79 @@ class App(tk.Tk):
                                  padx=12, pady=5)
         btn_conectar.pack(side="left")
 
-        self._rows[gid] = {
+        self._rows[key] = {
             "frame": frame, "lbl_nome": lbl_nome,
             "lbl_usb": lbl_usb, "lbl_wifi": lbl_wifi,
             "btn_modo": btn_modo, "btn_conectar": btn_conectar,
             "modo_var": modo_var, "modelo": modelo,
+            "g": g,
         }
 
-        btn_modo.config(command=lambda gi=gid: self._abrir_menu_modo(gi))
-        btn_conectar.config(command=lambda gi=gid: self._conectar(gi))
+        btn_modo.config(command=lambda k=key: self._abrir_menu(k))
+        btn_conectar.config(command=lambda k=key: self._conectar(k))
 
         self._update_row(g)
 
     def _update_row(self, g):
-        gid  = g["id"]
-        row  = self._rows.get(gid)
+        key  = g["key"]
+        row  = self._rows.get(key)
         if not row: return
 
-        # Labels de serial
+        row["g"] = g  # atualiza grupo salvo
+
+        # Label USB
         if g["usb_serial"]:
             cor = "#4caf50" if g["usb_on"] else "#666666"
-            st  = "ON" if g["usb_on"] else "OFF"
             row["lbl_usb"].config(
-                text=f"🔌 {g['usb_serial']}  •  {st}", fg=cor)
+                text=f"🔌 {g['usb_serial']}  •  {'ON' if g['usb_on'] else 'OFF'}",
+                fg=cor)
         else:
             row["lbl_usb"].config(text="")
 
+        # Label Wi-Fi — só mostra se wifi_serial existir
         if g["wifi_serial"]:
             cor = "#4caf50" if g["wifi_on"] else "#666666"
-            st  = "ON" if g["wifi_on"] else "OFF"
             row["lbl_wifi"].config(
-                text=f"📶 {g['wifi_serial']}  •  {st}", fg=cor)
+                text=f"📶 {g['wifi_serial']}  •  {'ON' if g['wifi_on'] else 'OFF'}",
+                fg=cor)
         else:
             row["lbl_wifi"].config(text="")
 
-        # Botão de modo
-        modo = row["modo_var"].get()
-        usb_ok  = g["usb_on"]  and g["usb_serial"]
-        wifi_ok = g["wifi_on"] and g["wifi_serial"]
+        usb_on  = g["usb_on"]
+        wifi_on = g["wifi_on"]
+        modo    = row["modo_var"].get()
 
-        # Se o modo atual ficou indisponível, muda automaticamente
-        if modo == "usb" and not usb_ok and wifi_ok:
-            row["modo_var"].set("wifi")
+        # Ajuste automático de modo se o atual ficou indisponível
+        if modo == "usb" and not usb_on and wifi_on:
             modo = "wifi"
-        elif modo == "wifi" and not wifi_ok and usb_ok:
+            row["modo_var"].set("wifi")
+        elif modo == "wifi" and not wifi_on and usb_on:
+            modo = "usb"
+            row["modo_var"].set("usb")
+
+        btn = row["btn_modo"]
+
+        if usb_on and wifi_on:
+            # Ambos ON → gaveta com ▾
+            lbl = "USB ▾" if modo == "usb" else "Wi-Fi ▾"
+            btn.config(text=lbl, state="normal",
+                       cursor="hand2", fg="#aaaaaa", bg="#333333",
+                       activebackground="#444444",
+                       activeforeground="#ffffff")
+        elif usb_on and not wifi_on:
+            # Só USB → label fixo sem gaveta
+            btn.config(text="USB", state="disabled",
+                       cursor="", fg="#555555", bg="#2a2a2a")
             row["modo_var"].set("usb")
             modo = "usb"
+        elif not usb_on and wifi_on:
+            # Só Wi-Fi → label fixo sem gaveta
+            btn.config(text="Wi-Fi", state="disabled",
+                       cursor="", fg="#555555", bg="#2a2a2a")
+            row["modo_var"].set("wifi")
+            modo = "wifi"
 
-        # Aparência do botão de modo
-        if wifi_ok:
-            # Tem Wi-Fi disponível → mostra gaveta
-            lbl = "USB ▾" if modo == "usb" else "Wi-Fi ▾"
-            row["btn_modo"].config(text=lbl, state="normal",
-                                   fg="#aaaaaa", bg="#333333")
-        else:
-            # Só USB → mostra "USB" sem gaveta, desabilitado visualmente
-            row["btn_modo"].config(text="USB", state="disabled",
-                                   fg="#555555", bg="#2a2a2a")
-
-        # Cor do botão conectar
+        # Cor do botão Conectar
         if modo == "wifi":
             row["btn_conectar"].config(bg="#00796b",
                                        activebackground="#00695c")
@@ -368,21 +406,17 @@ class App(tk.Tk):
             row["btn_conectar"].config(bg="#1976d2",
                                        activebackground="#1565c0")
 
-    # ── Menu de modo ─────────────────────────────────────────
-    def _abrir_menu_modo(self, gid):
-        row = self._rows.get(gid)
+    # ── Menu gaveta ───────────────────────────────────────────
+    def _abrir_menu(self, key):
+        row = self._rows.get(key)
         if not row: return
-
-        # Busca grupo atual
-        g = self._get_group_by_id(gid)
-        if not g: return
+        g    = row["g"]
+        modo = row["modo_var"].get()
 
         menu = tk.Menu(self, tearoff=0, bg="#2d2d2d", fg="#ffffff",
                        activebackground="#1976d2",
                        activeforeground="#ffffff",
                        font=("Segoe UI", 9), bd=0)
-
-        modo = row["modo_var"].get()
 
         def set_usb():
             row["modo_var"].set("usb")
@@ -396,12 +430,11 @@ class App(tk.Tk):
             row["btn_conectar"].config(bg="#00796b",
                                        activebackground="#00695c")
 
-        if g["usb_on"] and g["usb_serial"]:
+        if g["usb_on"]:
             menu.add_command(
                 label="🔌  USB" + ("  ✓" if modo == "usb" else ""),
                 command=set_usb)
-
-        if g["wifi_on"] and g["wifi_serial"]:
+        if g["wifi_on"]:
             menu.add_command(
                 label="📶  Wi-Fi" + ("  ✓" if modo == "wifi" else ""),
                 command=set_wifi)
@@ -410,43 +443,23 @@ class App(tk.Tk):
         menu.tk_popup(btn.winfo_rootx(),
                       btn.winfo_rooty() + btn.winfo_height())
 
-    def _get_group_by_id(self, gid):
-        """Reconstrói o grupo a partir dos dados salvos — usado só para o menu."""
-        # Lê o último estado da row
-        row = self._rows.get(gid)
-        if not row: return None
-        usb_txt  = row["lbl_usb"].cget("text")
-        wifi_txt = row["lbl_wifi"].cget("text")
-        return {
-            "id": gid,
-            "usb_serial":  gid if "ON" in usb_txt else None,
-            "usb_on":      "ON" in usb_txt,
-            "wifi_serial": self.data.get(gid, {}).get("ip", "") + f":{WIFI_PORT}"
-                           if "ON" in wifi_txt else None,
-            "wifi_on":     "ON" in wifi_txt,
-        }
-
-    # ── Conectar ─────────────────────────────────────────────
-    def _conectar(self, gid):
-        row = self._rows.get(gid)
+    # ── Conectar ──────────────────────────────────────────────
+    def _conectar(self, key):
+        row = self._rows.get(key)
         if not row: return
-        modo  = row["modo_var"].get()
-        nome  = self._get_name(gid, row["modelo"])
-        btn   = row["btn_conectar"]
+        g    = row["g"]
+        modo = row["modo_var"].get()
+        nome = self._get_name(key, row["modelo"])
+        btn  = row["btn_conectar"]
         btn.config(state="disabled", text="Aguarde...")
 
         def run():
             try:
-                if modo == "wifi":
-                    ip = self.data.get(gid, {}).get("ip")
-                    if not ip:
-                        self.after(0, messagebox.showerror, "Erro Wi-Fi",
-                                   "IP não disponível.")
-                        return
-                    target = f"{ip}:{WIFI_PORT}"
-                else:
-                    target = gid   # serial USB
-
+                target = g["wifi_serial"] if modo == "wifi" else g["usb_serial"]
+                if not target:
+                    self.after(0, messagebox.showerror, "Erro",
+                               "Serial não disponível.")
+                    return
                 subprocess.Popen(
                     [SCRCPY, "-s", target,
                      "--window-title", f"USB - {nome}"],
@@ -462,12 +475,12 @@ class App(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    # ── Editar nome ──────────────────────────────────────────
-    def _editar_nome(self, gid, modelo):
-        row = self._rows.get(gid)
+    # ── Editar nome ───────────────────────────────────────────
+    def _editar_nome(self, key, modelo):
+        row = self._rows.get(key)
         if not row: return
-        lbl = row["lbl_nome"]
-        nome_atual = self._get_name(gid, modelo)
+        lbl       = row["lbl_nome"]
+        nome_atual = self._get_name(key, modelo)
 
         lbl.pack_forget()
         entry = tk.Entry(lbl.master,
@@ -482,7 +495,7 @@ class App(tk.Tk):
 
         def salvar(event=None):
             novo = entry.get().strip() or modelo
-            self.data.setdefault(gid, {})["name"] = novo
+            self.data.setdefault(key, {})["name"] = novo
             save_data(self.data)
             entry.destroy()
             lbl.config(text=novo)
@@ -492,8 +505,8 @@ class App(tk.Tk):
             entry.destroy()
             lbl.pack(anchor="w")
 
-        entry.bind("<Return>", salvar)
-        entry.bind("<Escape>", cancelar)
+        entry.bind("<Return>",   salvar)
+        entry.bind("<Escape>",   cancelar)
         entry.bind("<FocusOut>", salvar)
 
     def on_close(self):
