@@ -18,9 +18,9 @@ jobs:
       - name: Instalar PyInstaller
         run: pip install pyinstaller
 
-      - name: Compilar My Android.exe
+      - name: Compilar My Android.exe com ícone
         run: |
-          pyinstaller --onefile --noconsole --name "My Android" launcher/scrcpy_launcher.py
+          pyinstaller --onefile --noconsole --name "My Android" --icon "launcher/icone.ico" launcher/scrcpy_launcher.py
 
       - name: Upload My Android.exe
         uses: actions/upload-artifact@v4
