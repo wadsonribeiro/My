@@ -22,46 +22,9 @@ jobs:
         run: |
           pyinstaller --onefile --noconsole --name "My Android" launcher/scrcpy_launcher.py
 
-      - name: Baixar pacote oficial scrcpy win64
-        uses: actions/download-artifact@v4
-        with:
-          name: release-win64
-          path: scrcpy-original/
-
-      - name: Montar pasta final com arquivos renomeados
-        shell: pwsh
-        run: |
-          # Cria pasta de saída
-          New-Item -ItemType Directory -Path "final-package" -Force
-
-          # Extrai o zip do scrcpy
-          $zip = Get-ChildItem scrcpy-original/*.zip | Select-Object -First 1
-          Expand-Archive -Path $zip.FullName -DestinationPath "scrcpy-extracted"
-
-          # Pega a subpasta extraída
-          $inner = Get-ChildItem scrcpy-extracted -Directory | Select-Object -First 1
-
-          # Copia todos os arquivos exceto scrcpy.exe e scrcpy-server
-          Get-ChildItem "$($inner.FullName)" | Where-Object {
-            $_.Name -ne "scrcpy.exe" -and $_.Name -ne "scrcpy-server"
-          } | Copy-Item -Destination "final-package/"
-
-          # Renomeia scrcpy.exe → base (sem extensão, sem ícone)
-          Copy-Item "$($inner.FullName)/scrcpy.exe" "final-package/base"
-
-          # Renomeia scrcpy-server → server
-          Copy-Item "$($inner.FullName)/scrcpy-server" "final-package/server"
-
-          # Copia My Android.exe
-          Copy-Item "dist/My Android.exe" "final-package/"
-
-          # Lista o conteúdo final
-          Write-Host "=== Conteúdo da pasta final ==="
-          Get-ChildItem "final-package/" | Format-Table Name, Length
-
-      - name: Upload pacote final
+      - name: Upload My Android.exe
         uses: actions/upload-artifact@v4
         with:
-          name: MyAndroid-win64
-          path: final-package/
+          name: MyAndroid-exe
+          path: "dist/My Android.exe"
           retention-days: 30
