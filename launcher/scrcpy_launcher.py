@@ -3,13 +3,16 @@ from tkinter import messagebox
 import subprocess
 import threading
 import os, sys, json, re, time
+import tempfile
+import ctypes
 
 # ─── Configuração ─────────────────────────────────────────────
-SCRCPY_EXE = "base"           # renomeado de scrcpy.exe
+SCRCPY_EXE = "base"
 ADB_EXE    = "adb.exe"
 WIFI_PORT  = 9990
 DATA_FILE  = "devices_data.json"
 POLL_MS    = 2500
+MUTEX_NAME = "MyAndroid_SingleInstance_Mutex"
 # ──────────────────────────────────────────────────────────────
 
 def get_base_dir():
@@ -21,6 +24,30 @@ BASE_DIR  = get_base_dir()
 SCRCPY    = os.path.join(BASE_DIR, SCRCPY_EXE)
 ADB       = os.path.join(BASE_DIR, ADB_EXE)
 DATA_PATH = os.path.join(BASE_DIR, DATA_FILE)
+
+# ─── Instância única ──────────────────────────────────────────
+def ensure_single_instance():
+    """
+    Usa Windows Mutex para garantir instância única.
+    Se já existe, encontra a janela aberta e traz para frente.
+    """
+    kernel32 = ctypes.windll.kernel32
+    mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    last_error = kernel32.GetLastError()
+
+    if last_error == 183:  # ERROR_ALREADY_EXISTS
+        # Traz a janela existente para frente
+        user32 = ctypes.windll.user32
+
+        # Procura a janela pelo título
+        hwnd = user32.FindWindowW(None, "My Android")
+        if hwnd:
+            # Restaura se minimizada
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+        sys.exit(0)
+
+    return mutex  # mantém o mutex vivo enquanto o app roda
 
 # ─── JSON ─────────────────────────────────────────────────────
 def load_data():
@@ -129,6 +156,15 @@ class App(tk.Tk):
         self.geometry("540x440")
         self.resizable(False, False)
         self.configure(bg="#1e1e1e")
+
+        # Ícone da janela
+        ico_path = os.path.join(BASE_DIR, "icone.ico")
+        if os.path.exists(ico_path):
+            try:
+                self.iconbitmap(ico_path)
+            except:
+                pass
+
         self.data     = load_data()
         self._rows    = {}
         self._polling = True
@@ -249,44 +285,43 @@ class App(tk.Tk):
                             bg="#2a2a2a", anchor="w")
         lbl_wifi.pack(anchor="w")
 
+        # ── Lado direito ──
         right = tk.Frame(frame, bg="#2a2a2a")
         right.pack(side="right", anchor="center")
 
         modo_var = tk.StringVar(value="usb")
 
-        # Badge de tipo de conexão ativa (USB / WI-FI)
-        lbl_conn = tk.Label(right, text="USB",
-                            font=("Segoe UI", 8, "bold"),
-                            bg="#1a3a1a", fg="#4caf50",
-                            padx=8, pady=4, anchor="center")
-        lbl_conn.pack(side="left", padx=(0, 4))
+        # Botão único que é tanto o seletor de modo quanto a gaveta
+        # Cores: USB = verde escuro, WI-FI = azul escuro
+        btn_modo = tk.Button(
+            right,
+            text="USB ▾",
+            font=("Segoe UI", 8, "bold"),
+            bg="#1a3a1a", fg="#4caf50",
+            activebackground="#224422", activeforeground="#66bb6a",
+            relief="flat", cursor="hand2",
+            padx=10, pady=6,
+            bd=0
+        )
+        btn_modo.pack(side="left", padx=(0, 2))
 
-        # Botão gaveta (só aparece quando ambos ON)
-        btn_modo = tk.Button(right, text="▾",
-                             font=("Segoe UI", 9, "bold"),
-                             bg="#333333", fg="#aaaaaa",
-                             activebackground="#444444",
-                             activeforeground="#ffffff",
-                             relief="flat", cursor="hand2",
-                             padx=6, pady=5)
-        # Não empacota ainda — só mostra quando gaveta disponível
-
-        btn_conectar = tk.Button(right, text="Conectar",
-                                 font=("Segoe UI", 9, "bold"),
-                                 bg="#1976d2", fg="#ffffff",
-                                 activebackground="#1565c0",
-                                 activeforeground="#ffffff",
-                                 relief="flat", cursor="hand2",
-                                 padx=12, pady=5)
+        btn_conectar = tk.Button(
+            right, text="Conectar",
+            font=("Segoe UI", 9, "bold"),
+            bg="#1976d2", fg="#ffffff",
+            activebackground="#1565c0", activeforeground="#ffffff",
+            relief="flat", cursor="hand2",
+            padx=12, pady=6,
+            bd=0
+        )
         btn_conectar.pack(side="left")
 
         self._rows[key] = {
             "frame": frame, "lbl_nome": lbl_nome,
             "lbl_usb": lbl_usb, "lbl_wifi": lbl_wifi,
-            "lbl_conn": lbl_conn,
             "btn_modo": btn_modo, "btn_conectar": btn_conectar,
             "modo_var": modo_var, "modelo": modelo, "g": g,
-            "gaveta_visivel": False,
+            "tem_gaveta": False,
         }
 
         btn_modo.config(command=lambda k=key: self._abrir_menu(k))
@@ -320,67 +355,77 @@ class App(tk.Tk):
         wifi_on = g["wifi_on"]
         modo    = row["modo_var"].get()
 
-        # Ajuste automático de modo
+        # Ajuste automático
         if modo == "usb" and not usb_on and wifi_on:
             modo = "wifi"; row["modo_var"].set("wifi")
         elif modo == "wifi" and not wifi_on and usb_on:
             modo = "usb";  row["modo_var"].set("usb")
 
-        # ── Badge de conexão ativa ──
-        lbl_conn = row["lbl_conn"]
-        if modo == "wifi":
-            lbl_conn.config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
-            row["btn_conectar"].config(bg="#00796b",
-                                       activebackground="#00695c")
-        else:
-            lbl_conn.config(text="USB", bg="#1a3a1a", fg="#4caf50")
-            row["btn_conectar"].config(bg="#1976d2",
-                                       activebackground="#1565c0")
+        btn = row["btn_modo"]
 
-        # ── Botão gaveta: só aparece se ambos ON ──
-        btn_modo = row["btn_modo"]
         if usb_on and wifi_on:
-            if not row["gaveta_visivel"]:
-                btn_modo.pack(side="left", padx=(0, 4),
-                              before=row["btn_conectar"])
-                row["gaveta_visivel"] = True
-        else:
-            if row["gaveta_visivel"]:
-                btn_modo.pack_forget()
-                row["gaveta_visivel"] = False
-            # Força modo correto quando só um disponível
-            if usb_on:
-                row["modo_var"].set("usb"); modo = "usb"
-                lbl_conn.config(text="USB", bg="#1a3a1a", fg="#4caf50")
-                row["btn_conectar"].config(bg="#1976d2",
-                                           activebackground="#1565c0")
-            else:
-                row["modo_var"].set("wifi"); modo = "wifi"
-                lbl_conn.config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
+            # Ambos ON → botão com ▾ clicável, cor do modo atual
+            row["tem_gaveta"] = True
+            btn.config(state="normal", cursor="hand2")
+            if modo == "wifi":
+                btn.config(text="Wi-Fi ▾", bg="#1a2a3a", fg="#42a5f5",
+                           activebackground="#1e3550",
+                           activeforeground="#64b5f6")
                 row["btn_conectar"].config(bg="#00796b",
                                            activebackground="#00695c")
+            else:
+                btn.config(text="USB ▾", bg="#1a3a1a", fg="#4caf50",
+                           activebackground="#224422",
+                           activeforeground="#66bb6a")
+                row["btn_conectar"].config(bg="#1976d2",
+                                           activebackground="#1565c0")
+        elif usb_on:
+            # Só USB → botão fixo sem ▾, sem cursor de clique
+            row["tem_gaveta"] = False
+            row["modo_var"].set("usb")
+            btn.config(text="USB", state="disabled", cursor="",
+                       bg="#1a3a1a", fg="#4caf50",
+                       activebackground="#1a3a1a",
+                       activeforeground="#4caf50")
+            row["btn_conectar"].config(bg="#1976d2",
+                                       activebackground="#1565c0")
+        else:
+            # Só Wi-Fi → botão fixo sem ▾
+            row["tem_gaveta"] = False
+            row["modo_var"].set("wifi")
+            btn.config(text="Wi-Fi", state="disabled", cursor="",
+                       bg="#1a2a3a", fg="#42a5f5",
+                       activebackground="#1a2a3a",
+                       activeforeground="#42a5f5")
+            row["btn_conectar"].config(bg="#00796b",
+                                       activebackground="#00695c")
 
     # ── Menu gaveta ───────────────────────────────────────────
     def _abrir_menu(self, key):
         row = self._rows.get(key)
-        if not row: return
+        if not row or not row["tem_gaveta"]: return
         g    = row["g"]
         modo = row["modo_var"].get()
 
-        menu = tk.Menu(self, tearoff=0, bg="#2d2d2d", fg="#ffffff",
-                       activebackground="#1976d2",
+        menu = tk.Menu(self, tearoff=0,
+                       bg="#2d2d2d", fg="#ffffff",
+                       activebackground="#333333",
                        activeforeground="#ffffff",
                        font=("Segoe UI", 9), bd=0)
 
         def set_usb():
             row["modo_var"].set("usb")
-            row["lbl_conn"].config(text="USB", bg="#1a3a1a", fg="#4caf50")
+            row["btn_modo"].config(
+                text="USB ▾", bg="#1a3a1a", fg="#4caf50",
+                activebackground="#224422", activeforeground="#66bb6a")
             row["btn_conectar"].config(bg="#1976d2",
                                        activebackground="#1565c0")
 
         def set_wifi():
             row["modo_var"].set("wifi")
-            row["lbl_conn"].config(text="WI-FI", bg="#1a2a3a", fg="#42a5f5")
+            row["btn_modo"].config(
+                text="Wi-Fi ▾", bg="#1a2a3a", fg="#42a5f5",
+                activebackground="#1e3550", activeforeground="#64b5f6")
             row["btn_conectar"].config(bg="#00796b",
                                        activebackground="#00695c")
 
@@ -414,15 +459,13 @@ class App(tk.Tk):
                     self.after(0, messagebox.showerror, "Erro",
                                "Serial não disponível.")
                     return
-                # Título mostra o tipo de conexão
                 tipo = "WI-FI" if modo == "wifi" else "USB"
-                env = os.environ.copy()
+                env  = os.environ.copy()
                 env["SCRCPY_SERVER_PATH"] = os.path.join(BASE_DIR, "server")
                 subprocess.Popen(
                     [SCRCPY, "-s", target,
                      "--window-title", f"{tipo} - {nome}"],
-                    cwd=BASE_DIR,
-                    env=env,
+                    cwd=BASE_DIR, env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
             except FileNotFoundError:
@@ -472,7 +515,9 @@ class App(tk.Tk):
         self._polling = False
         self.destroy()
 
+
 if __name__ == "__main__":
+    _mutex = ensure_single_instance()   # bloqueia segunda instância
     app = App()
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
