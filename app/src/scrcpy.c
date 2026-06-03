@@ -731,7 +731,7 @@ aoa_complete:
 
     if (options->window) {
         const char *window_title =
-            options->window_title ? options->window_title : info->device_name;
+            options->window_title ? options->window_title : "USB";
 
         struct sc_screen_params screen_params = {
             .video = options->video_playback,
