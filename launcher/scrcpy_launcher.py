@@ -31,13 +31,14 @@ DATA_PATH = os.path.join(BASE_DIR, DATA_FILE)
 #     "_modelo": "M2102J20SG"
 #   }
 # }
+# REGRA: só seriais USB como chave. IPs nunca são chave.
 
 def load_data():
     if os.path.exists(DATA_PATH):
         try:
             with open(DATA_PATH, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            # Remove chaves antigas que eram IPs (migração)
+            # Remove entradas antigas com IP como chave (migração)
             return {k: v for k, v in raw.items() if not is_wifi_serial(k)}
         except:
             pass
@@ -94,14 +95,14 @@ def fetch_raw_devices():
         devs.append({"serial": serial, "modelo": modelo, "status": status})
     return devs
 
-# ─── Lógica de agrupamento ────────────────────────────────────
+# ─── Agrupamento ──────────────────────────────────────────────
 def build_groups(raw_devs, data):
     """
-    Regras:
-    - Chave do grupo = sempre o serial USB (nunca IP)
-    - Só exibe grupo se usb_on OR wifi_on
-    - Wi-Fi serial órfão (sem USB dono na lista atual) só aparece
-      se o USB dono não estiver ON na sessão atual
+    REGRAS PRINCIPAIS:
+    1. Só aparece na tela se o serial USB estiver registrado no data
+       (foi visto ao menos uma vez conectado via USB).
+    2. Wi-Fi serial órfão (sem USB dono no data) é COMPLETAMENTE ignorado.
+    3. Grupo só exibido se usb_on OR wifi_on.
     """
     usb_map  = {}
     wifi_map = {}
@@ -112,63 +113,38 @@ def build_groups(raw_devs, data):
         else:
             usb_map[d["serial"]] = d
 
-    groups    = {}
-    used_wifi = set()
+    groups = []
 
-    # Grupos com USB presente
-    for usb_serial, d in usb_map.items():
-        usb_on      = d["status"] == "device"
-        wifi_serial = data.get(usb_serial, {}).get("wifi_serial")
+    # Itera apenas pelos USB seriais que estão NO data (já foram registrados)
+    for usb_serial, entry in data.items():
+        usb_d   = usb_map.get(usb_serial)
+        usb_on  = usb_d is not None and usb_d["status"] == "device"
+        modelo  = usb_d["modelo"] if usb_d else entry.get("_modelo", usb_serial)
+
+        wifi_serial = entry.get("wifi_serial")
         wifi_on     = False
-
         if wifi_serial:
-            wd = wifi_map.get(wifi_serial)
-            if wd:
-                wifi_on = wd["status"] != "offline"
-                used_wifi.add(wifi_serial)
+            wd      = wifi_map.get(wifi_serial)
+            wifi_on = wd is not None and wd["status"] != "offline"
 
+        # Só exibe se pelo menos um ON
         if not usb_on and not wifi_on:
             continue
 
-        groups[usb_serial] = {
+        groups.append({
             "key":         usb_serial,
             "usb_serial":  usb_serial,
             "usb_on":      usb_on,
             "wifi_serial": wifi_serial,
             "wifi_on":     wifi_on,
-            "modelo":      d["modelo"],
-        }
-
-    # Wi-Fi órfãos — só inclui se o USB dono NÃO está ON agora
-    for ws, wd in wifi_map.items():
-        if ws in used_wifi: continue
-        if wd["status"] == "offline": continue
-
-        # Acha o USB dono pelo data
-        usb_owner = None
-        for uid, udata in data.items():
-            if udata.get("wifi_serial") == ws:
-                usb_owner = uid
-                break
-
-        # Se o USB dono está ON agora, ignora este Wi-Fi órfão
-        # (significa que o IP mudou — o USB já está sendo tratado)
-        if usb_owner and usb_owner in usb_map and usb_map[usb_owner]["status"] == "device":
-            continue
-
-        key    = usb_owner if usb_owner else ws
-        modelo = data.get(usb_owner or "", {}).get("_modelo", ws)
-
-        groups[key] = {
-            "key":         key,
-            "usb_serial":  usb_owner,
-            "usb_on":      False,
-            "wifi_serial": ws,
-            "wifi_on":     True,
             "modelo":      modelo,
-        }
+        })
 
-    return list(groups.values())
+    # Dispositivos USB novos (ainda não no data) — registra mas não exibe ainda
+    # (aparecerão no próximo ciclo após o IP ser salvo)
+    # Nada a fazer aqui: o _fetch cuida do registro.
+
+    return groups
 
 
 # ─── App ──────────────────────────────────────────────────────
@@ -220,25 +196,26 @@ class App(tk.Tk):
             ip = get_ip_from_device(usb)
             if not ip: continue
 
-            new_wifi_serial = f"{ip}:{WIFI_PORT}"
-            entry           = self.data.setdefault(usb, {})
-            old_wifi_serial = entry.get("wifi_serial")
+            new_wifi = f"{ip}:{WIFI_PORT}"
+            entry    = self.data.setdefault(usb, {})
+            old_wifi = entry.get("wifi_serial")
 
             # Salva modelo
             entry["_modelo"] = d["modelo"]
 
-            if old_wifi_serial != new_wifi_serial:
-                # IP mudou — desconecta o antigo e conecta o novo
-                if old_wifi_serial:
-                    run_adb("disconnect", old_wifi_serial)
-                entry["wifi_serial"] = new_wifi_serial
+            if old_wifi != new_wifi:
+                # IP mudou — primeiro atualiza o data ANTES de qualquer outra coisa
+                if old_wifi:
+                    run_adb("disconnect", old_wifi)
+                entry["wifi_serial"] = new_wifi
                 save_data(self.data)
+                # Só depois conecta o novo
                 run_adb("-s", usb, "tcpip", str(WIFI_PORT))
                 time.sleep(0.6)
-                run_adb("connect", new_wifi_serial)
+                run_adb("connect", new_wifi)
             else:
-                # Mesmo IP — garante que está conectado
-                run_adb("connect", new_wifi_serial)
+                # Mesmo IP — garante conectado
+                run_adb("connect", new_wifi)
 
         groups = build_groups(raw, self.data)
         self.after(0, self._update_ui, groups)
@@ -334,7 +311,6 @@ class App(tk.Tk):
 
         btn_modo.config(command=lambda k=key: self._abrir_menu(k))
         btn_conectar.config(command=lambda k=key: self._conectar(k))
-
         self._update_row(g)
 
     def _update_row(self, g):
@@ -343,7 +319,6 @@ class App(tk.Tk):
         if not row: return
         row["g"] = g
 
-        # Label USB
         if g["usb_serial"]:
             cor = "#4caf50" if g["usb_on"] else "#666666"
             row["lbl_usb"].config(
@@ -352,7 +327,6 @@ class App(tk.Tk):
         else:
             row["lbl_usb"].config(text="")
 
-        # Label Wi-Fi — só mostra se wifi_serial conhecido
         if g["wifi_serial"]:
             cor = "#4caf50" if g["wifi_on"] else "#666666"
             row["lbl_wifi"].config(
@@ -365,14 +339,12 @@ class App(tk.Tk):
         wifi_on = g["wifi_on"]
         modo    = row["modo_var"].get()
 
-        # Ajuste automático
         if modo == "usb" and not usb_on and wifi_on:
             modo = "wifi"; row["modo_var"].set("wifi")
         elif modo == "wifi" and not wifi_on and usb_on:
             modo = "usb";  row["modo_var"].set("usb")
 
         btn = row["btn_modo"]
-
         if usb_on and wifi_on:
             lbl = "USB ▾" if modo == "usb" else "Wi-Fi ▾"
             btn.config(text=lbl, state="normal", cursor="hand2",
