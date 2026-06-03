@@ -428,8 +428,10 @@ class App(tk.Tk):
 
         ico = os.path.join(BASE_DIR, "icone.ico")
         if os.path.exists(ico):
-            try: self.iconbitmap(ico)
-            except: pass
+            try:
+                self.iconbitmap(ico)
+            except:
+                pass
 
         self.data      = load_data()
         self._rows     = {}
@@ -718,14 +720,19 @@ class App(tk.Tk):
         if sess:
             # Fecha toolbar
             tb = sess.get("toolbar")
-            if tb and tb.winfo_exists():
-                try: tb.destroy()
-            except: pass
+            if tb:
+                try:
+                    if tb.winfo_exists():
+                        tb.destroy()
+                except:
+                    pass
             # Termina processo
             proc = sess.get("proc")
             if proc:
-                try: proc.terminate()
-                except: pass
+                try:
+                    proc.terminate()
+                except:
+                    pass
             del self._sessions[key]
 
         # Aguarda um momento e relança
