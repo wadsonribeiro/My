@@ -46,6 +46,20 @@ def patch_once(content, marker, insertion, after=True):
         idx += len(marker)
     return content[:idx] + insertion + content[idx:]
 
+def patch_once_any(content, markers, insertion, after=True):
+    """Try each marker in order; apply insertion at the first one found."""
+    if insertion.strip() in content:
+        return content  # already applied
+    for marker in markers:
+        if marker in content:
+            return patch_once(content, marker, insertion, after=after)
+    raise ValueError(
+        f"None of the candidate markers were found in the file.\n"
+        f"Tried: {markers}\n"
+        f"First 30 lines of file:\n" +
+        "\n".join(content.splitlines()[:30])
+    )
+
 def replace_once(content, old, new):
     if new.strip() in content:
         return content  # already applied
@@ -295,23 +309,50 @@ def patch_screen_c():
     path = os.path.join('app', 'src', 'screen.c')
     c = read(path)
 
-    # Includes
-    c = patch_once(c, '#include "version.h"', '\n' + SCREEN_C_INCLUDES)
+    # ── Includes ──────────────────────────────────────────────────────────────
+    # Try several anchors that have appeared across scrcpy versions
+    include_anchors = [
+        '#include "version.h"',
+        '#include "display.h"',
+        '#include "screen.h"',
+        '#include "util/log.h"',
+        '#include "util/str.h"',
+        '#include <assert.h>',
+        '#include <SDL2/SDL.h>',
+    ]
+    c = patch_once_any(c, include_anchors, '\n' + SCREEN_C_INCLUDES)
 
-    # Inject callback block after the first #define in the file
-    c = patch_once(c, '#define SC_WINDOW_TITLE', PANEL_CALLBACKS, after=False)
+    # ── Callback block injection ───────────────────────────────────────────────
+    # Insert BEFORE the first #define (works on all known versions)
+    define_anchors = [
+        '#define SC_WINDOW_TITLE',
+        '#define SC_DISPLAY_MARGINS',
+        '#define DISPLAY_MARGINS',
+        '#define SC_SCREEN_',
+    ]
+    c = patch_once_any(c, define_anchors, PANEL_CALLBACKS, after=False)
 
-    # Hook render: find SDL_RenderPresent call and add panel overlay right after
-    c = patch_once(c, 'SDL_RenderPresent(display->renderer);', RENDER_PANEL_HOOK)
+    # ── Render hook ───────────────────────────────────────────────────────────
+    render_anchors = [
+        'SDL_RenderPresent(display->renderer);',
+        'SDL_RenderPresent(screen->display.renderer);',
+        'SDL_RenderPresent(renderer);',
+    ]
+    c = patch_once_any(c, render_anchors, RENDER_PANEL_HOOK)
 
-    # Hook sc_screen_init: call sc_screen_panel_init after sc_input_manager_init
-    c = patch_once(c, 'sc_input_manager_init(&screen->im, &im_params);',
-                   '''\n\n    /* Panel init */
+    # ── Panel init hook ───────────────────────────────────────────────────────
+    init_anchors = [
+        'sc_input_manager_init(&screen->im, &im_params);',
+        'sc_input_manager_init(&screen->im,',
+        'sc_input_manager_init(',
+    ]
+    panel_init_code = '''\n\n    /* Panel init */
     if (!sc_screen_panel_init(screen,
             params->serial ? params->serial : "")) {
         LOGE("Panel init failed (non-fatal)");
     }
-''')
+'''
+    c = patch_once_any(c, init_anchors, panel_init_code)
 
     write(path, c)
 
