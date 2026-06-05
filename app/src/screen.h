@@ -14,195 +14,92 @@
 #include "coords.h"
 #include "disconnect.h"
 #include "fps_counter.h"
-#include "frame_buffer.h"
-#include "input_manager.h"
-#include "mouse_capture.h"
-#include "options.h"
-#include "texture.h"
-#include "trait/key_processor.h"
+#include "graphic_buffer.h"
+#include "orientation.h"
+#include "sidebar.h"          // ← ADICIONADO
 #include "trait/frame_sink.h"
-#include "trait/mouse_processor.h"
 #include "util/thread.h"
-
-#ifdef __APPLE__
-# define SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
-#endif
+#include "util/tick.h"
 
 struct sc_screen {
-    struct sc_frame_sink frame_sink; // frame sink trait
-
-#ifndef NDEBUG
-    bool open; // track the open/close state to assert correct behavior
-#endif
-
-    bool video;
-    bool camera;
-    bool window_aspect_ratio_lock;
-    bool flex_display;
+    struct sc_frame_sink frame_sink; // must be the first field
 
     struct sc_controller *controller;
-
-    struct sc_screen_bg_color {
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
-    } bg;
-
-    struct sc_texture tex;
-    struct sc_input_manager im;
-    struct sc_mouse_capture mc; // only used in mouse relative mode
-    struct sc_fps_counter fps_counter;
-
-    struct sc_mutex mutex;
-    struct sc_frame_buffer fb; // protected by mutex
-    // When true, a frame size change must not cause the window to be resized
-    bool prevent_auto_resize; // protected by mutex
-
-    // The initial requested window properties
-    struct {
-        int16_t x;
-        int16_t y;
-        uint16_t width;
-        uint16_t height;
-        bool fullscreen;
-        bool start_fps_counter;
-    } req;
+    struct sc_file_pusher *file_pusher;
+    const struct sc_screen_capture *screen_capture;
 
     SDL_Window *window;
     SDL_Renderer *renderer;
-#ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
-    SDL_GLContext gl_context;
-#endif
-
-    enum sc_render_fit render_fit;
-
+    SDL_Texture *texture;
     struct sc_size frame_size;
-    struct sc_size content_size; // rotated frame_size
-
-    bool resize_pending; // resize requested while fullscreen or maximized
-    // The content size the last time the window was not maximized or
-    // fullscreen (meaningful only when resize_pending is true)
-    struct sc_size windowed_content_size;
-
-    // client orientation
-    enum sc_orientation orientation;
-    // rectangle of the content (excluding black borders)
-    struct SDL_FRect rect;
-    bool window_shown;
-
-    // only accessed from the thread calling sc_frame_sink_ops functions
-    struct sc_stream_session current_session;
-
-    AVFrame *frame;
-
-    bool paused;
-    AVFrame *resume_frame;
-
-    bool disconnected;
-    bool disconnect_started;
-    struct sc_disconnect disconnect;
-
-    // Track resize requests caused by frame-size changes
-    struct sc_resize_tracker {
-        sc_tick time; // 0 means none
-        struct sc_size size;
-    } resize_tracker;
-};
-
-struct sc_screen_params {
-    bool video;
-    bool camera;
-    bool flex_display;
-
-    struct sc_controller *controller;
-    struct sc_file_pusher *fp;
-    struct sc_key_processor *kp;
-    struct sc_mouse_processor *mp;
-    struct sc_gamepad_processor *gp;
-
-    struct sc_mouse_bindings mouse_bindings;
-    bool legacy_paste;
-    bool clipboard_autosync;
-    uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
-
-    const char *window_title;
-    bool always_on_top;
-
-    int16_t window_x; // accepts SC_WINDOW_POSITION_UNDEFINED
-    int16_t window_y; // accepts SC_WINDOW_POSITION_UNDEFINED
-    uint16_t window_width;
-    uint16_t window_height;
-
-    uint32_t background_color;
-
-    bool window_aspect_ratio_lock;
-    bool window_borderless;
-
-    enum sc_render_fit render_fit;
+    struct sc_size content_size; // the part of the window containing the device
+                                 // screen (window minus black borders)
     enum sc_orientation orientation;
     bool mipmaps;
 
+    struct sc_sidebar sidebar;   // ← ADICIONADO
+
+    bool windowed;    // contain at least one resize from the initial size
     bool fullscreen;
-    bool start_fps_counter;
+    bool maximized;
+    bool minimized; // window is minimized (not rendered)
+
+    bool resize_pending; // resize requested while fullscreen or maximized
+    struct sc_size pending_resize;
+
+    bool no_window;
+
+    struct sc_disconnect disconnect;
+
+    bool mouse_capture_key_pressed; // track key pressed during mouse capture
+
+    struct sc_fps_counter fps_counter;
+
+    struct sc_graphic_buffer graphic_buffer;
+
+    const struct sc_screen_ops *ops;
 };
 
-// initialize screen, create window, renderer and texture (window is hidden)
+struct sc_screen_params {
+    struct sc_controller *controller;
+    struct sc_file_pusher *file_pusher;
+    const struct sc_screen_capture *screen_capture;
+    const char *window_title;
+    bool windowed;
+    struct sc_size frame_size;
+    bool always_on_top;
+    int16_t window_x; // SDL_WINDOWPOS_UNDEFINED if not set
+    int16_t window_y; // SDL_WINDOWPOS_UNDEFINED if not set
+    uint16_t window_width;
+    uint16_t window_height;
+    bool window_borderless;
+    enum sc_orientation orientation;
+    bool mipmaps;
+    bool fullscreen;
+    bool no_window;
+    bool print_fps;
+};
+
+struct sc_screen_ops {
+    void (*on_frame_received)(struct sc_screen *screen);
+    void (*on_frame_rendered)(struct sc_screen *screen);
+};
+
 bool
 sc_screen_init(struct sc_screen *screen, const struct sc_screen_params *params);
 
-// request to interrupt any inner thread
-// must be called before sc_screen_join()
-void
-sc_screen_interrupt(struct sc_screen *screen);
-
-// join any inner thread
-void
-sc_screen_join(struct sc_screen *screen);
-
-// destroy window, renderer and texture (if any)
 void
 sc_screen_destroy(struct sc_screen *screen);
 
-// hide the window
-//
-// It is used to hide the window immediately on closing without waiting for
-// screen_destroy()
 void
-sc_screen_hide_window(struct sc_screen *screen);
+sc_screen_set_ops(struct sc_screen *screen, const struct sc_screen_ops *ops);
 
-// toggle the fullscreen mode
-void
-sc_screen_toggle_fullscreen(struct sc_screen *screen);
+// Returns the content size (actual video area, not window size)
+struct sc_size
+sc_screen_get_content_size(const struct sc_screen *screen);
 
-// resize window to optimal size (remove black borders)
-void
-sc_screen_resize_to_fit(struct sc_screen *screen);
-
-// resize window to 1:1 (pixel-perfect)
-void
-sc_screen_resize_to_pixel_perfect(struct sc_screen *screen);
-
-// set the display orientation
-void
-sc_screen_set_orientation(struct sc_screen *screen,
-                          enum sc_orientation orientation);
-
-// set the display pause state
-void
-sc_screen_set_paused(struct sc_screen *screen, bool paused);
-
-// react to SDL events
-void
+// Handles SDL events for the screen
+bool
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event);
 
-// run the event loop once the device is disconnected
-void
-sc_screen_handle_disconnection(struct sc_screen *screen);
-
-// convert point from window coordinates to frame coordinates
-// x and y are expressed in pixels
-struct sc_point
-sc_screen_convert_window_to_frame_coords(struct sc_screen *screen,
-                                        int32_t x, int32_t y);
-
-#endif
+#endif // SC_SCREEN_H

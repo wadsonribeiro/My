@@ -7,6 +7,7 @@
 #include "events.h"
 #include "icon.h"
 #include "options.h"
+#include "sidebar.h"
 #include "util/log.h"
 #include "util/sdl.h"
 
@@ -70,24 +71,16 @@ get_preferred_display_bounds(struct sc_size *bounds) {
 
 static bool
 is_optimal_size(struct sc_size current_size, struct sc_size content_size) {
-    // The size is optimal if we can recompute one dimension of the current
-    // size from the other
     return current_size.height == (uint32_t) current_size.width
                                 * content_size.height / content_size.width
         || current_size.width == (uint32_t) current_size.height
                                * content_size.width / content_size.height;
 }
 
-// return the optimal size of the window, with the following constraints:
-//  - it attempts to keep at least one dimension of the current_size (i.e. it
-//    crops the black borders)
-//  - it keeps the aspect ratio
-//  - it scales down to make it fit in the display_size
 static struct sc_size
 get_optimal_size(struct sc_size current_size, struct sc_size content_size,
                  bool within_display_bounds) {
     if (content_size.width == 0 || content_size.height == 0) {
-        // avoid division by 0
         return current_size;
     }
 
@@ -96,7 +89,6 @@ get_optimal_size(struct sc_size current_size, struct sc_size content_size,
     struct sc_size display_size;
     if (!within_display_bounds ||
             !get_preferred_display_bounds(&display_size)) {
-        // do not constraint the size
         window_size = current_size;
     } else {
         window_size.width = MIN(current_size.width, display_size.width);
@@ -110,12 +102,9 @@ get_optimal_size(struct sc_size current_size, struct sc_size content_size,
     bool keep_width = (uint32_t) content_size.width * window_size.height
                     > (uint32_t) content_size.height * window_size.width;
     if (keep_width) {
-        // remove black borders on top and bottom
         window_size.height = (uint32_t) content_size.height * window_size.width
                            / content_size.width;
     } else {
-        // remove black borders on left and right (or none at all if it already
-        // fits)
         window_size.width = (uint32_t) content_size.width * window_size.height
                           / content_size.height;
     }
@@ -123,8 +112,6 @@ get_optimal_size(struct sc_size current_size, struct sc_size content_size,
     return window_size;
 }
 
-// initially, there is no current size, so use the frame size as current size
-// req_width and req_height, if not 0, are the sizes requested by the user
 static inline struct sc_size
 get_initial_optimal_size(struct sc_size content_size, uint16_t req_width,
                          uint16_t req_height) {
@@ -135,14 +122,12 @@ get_initial_optimal_size(struct sc_size content_size, uint16_t req_width,
         if (req_width) {
             window_size.width = req_width;
         } else {
-            // compute from the requested height
             window_size.width = (uint32_t) req_height * content_size.width
                               / content_size.height;
         }
         if (req_height) {
             window_size.height = req_height;
         } else {
-            // compute from the requested width
             window_size.height = (uint32_t) req_width * content_size.height
                                / content_size.width;
         }
@@ -159,7 +144,6 @@ sc_screen_track_resize(struct sc_screen *screen, struct sc_size size) {
 
 static inline bool
 sc_screen_is_relative_mode(struct sc_screen *screen) {
-    // screen->im.mp may be NULL if --no-control
     return screen->im.mp && screen->im.mp->relative_mode;
 }
 
@@ -167,20 +151,26 @@ static void
 compute_content_rect(struct sc_size window_size, struct sc_size content_size,
                      bool is_icon, enum sc_render_fit render_fit,
                      SDL_FRect *rect) {
+    // Reserve right side for sidebar — only when not icon mode
+    struct sc_size video_area = window_size;
+    if (!is_icon) {
+        video_area.width = (window_size.width > SIDEBAR_WIDTH)
+                         ? window_size.width - SIDEBAR_WIDTH
+                         : window_size.width;
+    }
+
     if (is_icon) {
-        if (content_size.width <= window_size.width
-                && content_size.height <= window_size.height) {
-            // Center without upscaling
-            rect->x = (window_size.width - content_size.width) / 2.f;
-            rect->y = (window_size.height - content_size.height) / 2.f;
+        if (content_size.width <= video_area.width
+                && content_size.height <= video_area.height) {
+            rect->x = (video_area.width - content_size.width) / 2.f;
+            rect->y = (video_area.height - content_size.height) / 2.f;
             rect->w = content_size.width;
             rect->h = content_size.height;
             return;
         }
     } else if (render_fit == SC_RENDER_FIT_UNSCALED) {
-        // Cast to float first because input sizes are unsigned
-        float x = ((float) window_size.width - content_size.width) / 2.f;
-        float y = ((float) window_size.height - content_size.height) / 2.f;
+        float x = ((float) video_area.width - content_size.width) / 2.f;
+        float y = ((float) video_area.height - content_size.height) / 2.f;
         rect->x = MAX(0, x);
         rect->y = MAX(0, y);
         rect->w = content_size.width;
@@ -189,41 +179,40 @@ compute_content_rect(struct sc_size window_size, struct sc_size content_size,
     } else if (render_fit == SC_RENDER_FIT_STRETCHED) {
         rect->x = 0;
         rect->y = 0;
-        rect->w = window_size.width;
-        rect->h = window_size.height;
+        rect->w = video_area.width;
+        rect->h = video_area.height;
         return;
     }
 
     assert(is_icon || render_fit == SC_RENDER_FIT_LETTERBOX);
 
-    if (is_optimal_size(window_size, content_size)) {
+    if (is_optimal_size(video_area, content_size)) {
         rect->x = 0;
         rect->y = 0;
-        rect->w = window_size.width;
-        rect->h = window_size.height;
+        rect->w = video_area.width;
+        rect->h = video_area.height;
         return;
     }
 
-    bool keep_width = (uint32_t) content_size.width * window_size.height
-                    > (uint32_t) content_size.height * window_size.width;
+    bool keep_width = (uint32_t) content_size.width * video_area.height
+                    > (uint32_t) content_size.height * video_area.width;
     if (keep_width) {
         rect->x = 0;
-        rect->w = window_size.width;
-        rect->h = (float) window_size.width * content_size.height
-                                            / content_size.width;
-        rect->y = (window_size.height - rect->h) / 2.f;
+        rect->w = video_area.width;
+        rect->h = (float) video_area.width * content_size.height
+                                           / content_size.width;
+        rect->y = (video_area.height - rect->h) / 2.f;
     } else {
         rect->y = 0;
-        rect->h = window_size.height;
-        rect->w = (float) window_size.height * content_size.width
-                                             / content_size.height;
-        rect->x = (window_size.width - rect->w) / 2.f;
+        rect->h = video_area.height;
+        rect->w = (float) video_area.height * content_size.width
+                                            / content_size.height;
+        rect->x = (video_area.width - rect->w) / 2.f;
     }
 }
 
 static void
 sc_screen_update_content_rect(struct sc_screen *screen) {
-    // Only upscale video frames, not icon
     bool is_icon = !screen->video || screen->disconnected;
 
     struct sc_size window_size = sc_sdl_get_window_size(screen->window);
@@ -231,10 +220,56 @@ sc_screen_update_content_rect(struct sc_screen *screen) {
                          screen->render_fit, &screen->rect);
 }
 
-// render the texture to the renderer
-//
-// Set the update_content_rect flag if the window or content size may have
-// changed, so that the content rectangle is recomputed
+// Handle sidebar button click — runs ADB commands for device control
+static void
+sc_screen_sidebar_click(struct sc_screen *screen, int btn) {
+    if (btn < 0) return;
+
+    switch (btn) {
+        case SC_SIDEBAR_BTN_SCREENSHOT: {
+            // Create Prints folder and save screenshot
+#ifdef _WIN32
+            system("if not exist Prints mkdir Prints");
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd),
+                "adb exec-out screencap -p > Prints\\print_%llu.png",
+                (unsigned long long) SDL_GetTicks());
+            system(cmd);
+#else
+            system("mkdir -p Prints");
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd),
+                "adb exec-out screencap -p > Prints/print_%llu.png",
+                (unsigned long long) SDL_GetTicks());
+            system(cmd);
+#endif
+            break;
+        }
+        case SC_SIDEBAR_BTN_AUDIO:
+            // Toggle mute on Android side
+            sc_sidebar_toggle_audio(&screen->sidebar);
+            system("adb shell input keyevent 164");
+            break;
+        case SC_SIDEBAR_BTN_VOL_DOWN:
+            system("adb shell input keyevent 25");
+            break;
+        case SC_SIDEBAR_BTN_VOL_UP:
+            system("adb shell input keyevent 24");
+            break;
+        case SC_SIDEBAR_BTN_BACK:
+            system("adb shell input keyevent 4");
+            break;
+        case SC_SIDEBAR_BTN_HOME:
+            system("adb shell input keyevent 3");
+            break;
+        case SC_SIDEBAR_BTN_APP_SWITCH:
+            system("adb shell input keyevent 187");
+            break;
+        default:
+            break;
+    }
+}
+
 static void
 sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     assert(screen->window_shown);
@@ -250,13 +285,11 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
 
     SDL_Texture *texture = screen->tex.texture;
     if (!texture) {
-        goto end;
+        goto render_sidebar;
     }
 
     float scale = SDL_GetWindowPixelDensity(screen->window);
     if (scale == 0) {
-        // Just in case, but in practice the function can only fail when window
-        // is invalid
         LOGE("Cannot get scale value: %s", SDL_GetError());
         scale = 1;
     }
@@ -271,7 +304,6 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
 
     bool ok = false;
     if (orientation == SC_ORIENTATION_0) {
-        // always align to a physical pixel
         geometry.x = (int32_t) geometry.x;
         geometry.y = (int32_t) geometry.y;
         ok = SDL_RenderTexture(renderer, texture, NULL, &geometry);
@@ -294,7 +326,6 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         SDL_FlipMode flip = sc_orientation_is_mirror(orientation)
                               ? SDL_FLIP_HORIZONTAL : 0;
 
-        // always align to a physical pixel
         dstrect->x = (int32_t) dstrect->x;
         dstrect->y = (int32_t) dstrect->y;
         ok = SDL_RenderTextureRotated(renderer, texture, NULL, dstrect, angle,
@@ -305,7 +336,16 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         LOGE("Could not render texture: %s", SDL_GetError());
     }
 
-end:
+render_sidebar:
+    // Render sidebar on the right side
+    if (screen->video && !screen->disconnected) {
+        struct sc_size win = sc_sdl_get_window_size(screen->window);
+        sc_sidebar_update_layout(&screen->sidebar,
+                                 (int) win.width - SIDEBAR_WIDTH,
+                                 (int) win.height);
+        sc_sidebar_render(&screen->sidebar);
+    }
+
     sc_sdl_render_present(renderer);
 }
 
@@ -326,7 +366,6 @@ sc_screen_request_resize_display(struct sc_screen *screen, uint16_t width,
 
 static void
 sc_screen_on_resize(struct sc_screen *screen, const SDL_WindowEvent *event) {
-    // This event can be triggered before the window is shown
     if (!screen->window_shown) {
         return;
     }
@@ -344,13 +383,10 @@ sc_screen_on_resize(struct sc_screen *screen, const SDL_WindowEvent *event) {
             struct sc_resize_tracker *tracker = &screen->resize_tracker;
             if (tracker->time
                     && sc_tick_now() >= tracker->time + SC_TICK_FROM_MS(3000)) {
-                // Remove obsolete request
                 tracker->time = 0;
             }
             if (tracker->time && tracker->size.width == width
                               && tracker->size.height == height) {
-                // This resize event is the result of a previous (recent) resize
-                // request triggered by a change in the frame's dimensions.
                 LOGV("Ignore local resize: %" PRIu16 "x%" PRIu16,
                      width, height);
                 tracker->time = 0;
@@ -366,11 +402,6 @@ sc_screen_on_resize(struct sc_screen *screen, const SDL_WindowEvent *event) {
 #endif
 
 #ifdef CONTINUOUS_RESIZING_WORKAROUND
-// On Windows and MacOS, resizing blocks the event loop, so resizing events are
-// not triggered. As a workaround, handle them in an event handler.
-//
-// <https://bugzilla.libsdl.org/show_bug.cgi?id=2077>
-// <https://stackoverflow.com/a/40693139/1987178>
 static bool
 event_watcher(void *data, SDL_Event *event) {
     struct sc_screen *screen = data;
@@ -378,8 +409,6 @@ event_watcher(void *data, SDL_Event *event) {
 
     if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
             || event->type == SDL_EVENT_WINDOW_RESIZED) {
-        // In practice, it seems to always be called from the same thread in
-        // that specific case. Anyway, it's just a workaround.
         sc_screen_on_resize(screen, &event->window);
     }
 
@@ -401,9 +430,6 @@ sc_screen_frame_sink_open(struct sc_frame_sink *sink,
         return false;
     }
 
-    // content_size can be written from this thread, because it is never read
-    // from the main thread before handling SC_EVENT_OPEN_WINDOW (which acts as
-    // a synchronization point) when video is enabled
     screen->frame_size.width = session->video.width;
     screen->frame_size.height = session->video.height;
     screen->content_size = get_oriented_size(screen->frame_size,
@@ -420,7 +446,6 @@ sc_screen_frame_sink_open(struct sc_frame_sink *sink,
     screen->open = true;
 #endif
 
-    // nothing to do, the screen is already open on the main thread
     return true;
 }
 
@@ -431,8 +456,6 @@ sc_screen_frame_sink_close(struct sc_frame_sink *sink) {
 #ifndef NDEBUG
     screen->open = false;
 #endif
-
-    // nothing to do, the screen lifecycle is not managed by the frame producer
 }
 
 static bool
@@ -451,10 +474,7 @@ sc_screen_frame_sink_push(struct sc_frame_sink *sink, const AVFrame *frame) {
 
     if (previous_skipped) {
         sc_fps_counter_add_skipped_frame(&screen->fps_counter);
-        // The SC_EVENT_NEW_FRAME triggered for the previous frame will consume
-        // this new frame instead
     } else {
-        // Post the event on the UI thread
         bool ok = sc_push_event(SC_EVENT_NEW_FRAME);
         if (!ok) {
             return false;
@@ -530,7 +550,6 @@ sc_screen_init(struct sc_screen *screen,
         }
     }
 
-    // Always create the window hidden to prevent blinking during initialization
     uint32_t window_flags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
     if (params->always_on_top) {
         window_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
@@ -539,7 +558,6 @@ sc_screen_init(struct sc_screen *screen,
         window_flags |= SDL_WINDOW_BORDERLESS;
     }
     if (params->video) {
-        // The window will be shown on first frame
         window_flags |= SDL_WINDOW_RESIZABLE;
     }
 
@@ -548,7 +566,7 @@ sc_screen_init(struct sc_screen *screen,
 
     int x = SDL_WINDOWPOS_UNDEFINED;
     int y = SDL_WINDOWPOS_UNDEFINED;
-    int width = 256;
+    int width = 256 + SIDEBAR_WIDTH;
     int height = 256;
     if (params->window_x != SC_WINDOW_POSITION_UNDEFINED) {
         x = params->window_x;
@@ -557,13 +575,12 @@ sc_screen_init(struct sc_screen *screen,
         y = params->window_y;
     }
     if (params->window_width) {
-        width = params->window_width;
+        width = params->window_width + SIDEBAR_WIDTH;
     }
     if (params->window_height) {
         height = params->window_height;
     }
 
-    // The window will be positioned and sized on first video frame
     screen->window =
         sc_sdl_create_window(title, x, y, width, height, window_flags);
     if (!screen->window) {
@@ -577,15 +594,15 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_window;
     }
 
+    // Initialize sidebar
+    sc_sidebar_init(&screen->sidebar, screen->renderer);
+
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
     screen->gl_context = NULL;
 
-    // starts with "opengl"
     const char *renderer_name = SDL_GetRendererName(screen->renderer);
     bool use_opengl = renderer_name && !strncmp(renderer_name, "opengl", 6);
     if (use_opengl) {
-        // Persuade macOS to give us something better than OpenGL 2.1.
-        // If we create a Core Profile context, we get the best OpenGL version.
         bool ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                                       SDL_GL_CONTEXT_PROFILE_CORE);
         if (!ok) {
@@ -630,11 +647,9 @@ sc_screen_init(struct sc_screen *screen,
 
         sc_icon_destroy(icon);
     } else {
-        // not fatal
         LOGE("Could not load icon");
 
         if (!params->video) {
-            // Make sure the content size is initialized
             screen->content_size.width = 256;
             screen->content_size.height = 256;
         }
@@ -662,7 +677,6 @@ sc_screen_init(struct sc_screen *screen,
 
     sc_input_manager_init(&screen->im, &im_params);
 
-    // Initialize even if not used for simplicity
     sc_mouse_capture_init(&screen->mc, screen->window, params->shortcut_mods);
 
 #ifdef CONTINUOUS_RESIZING_WORKAROUND
@@ -691,12 +705,10 @@ sc_screen_init(struct sc_screen *screen,
 #endif
 
     if (!screen->video) {
-        // Show the window immediately
         screen->window_shown = true;
         sc_sdl_show_window(screen->window);
 
         if (sc_screen_is_relative_mode(screen)) {
-            // Capture mouse immediately if video mirroring is disabled
             sc_mouse_capture_set_active(&screen->mc, true);
         }
     }
@@ -739,11 +751,12 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
         get_initial_optimal_size(screen->content_size, screen->req.width,
                                                        screen->req.height);
 
+    // Add sidebar width to the window
+    window_size.width += SIDEBAR_WIDTH;
+
     if (screen->flex_display
-            && window_size.width == screen->content_size.width
+            && (window_size.width - SIDEBAR_WIDTH) == screen->content_size.width
             && window_size.height == screen->content_size.height) {
-        // Avoid sending an unnecessary initial "resize display" request to the
-        // server if the size has not changed.
         sc_screen_track_resize(screen, window_size);
     }
 
@@ -816,7 +829,6 @@ sc_screen_destroy(struct sc_screen *screen) {
                                  SC_EVENT_DISCONNECTED_ICON_LOADED);
     if (nevents == 1) {
         assert(event.type == SC_EVENT_DISCONNECTED_ICON_LOADED);
-        // The event was posted, but not handled, the icon must be freed
         SDL_Surface *dangling_icon = event.user.data1;
         sc_icon_destroy(dangling_icon);
     }
@@ -830,13 +842,17 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
     struct sc_size target_size = new_content_size;
     if (!screen->flex_display) {
         struct sc_size window_size = sc_sdl_get_window_size(screen->window);
-        // Scale proportionally
-        target_size.width = (uint32_t) window_size.width * target_size.width
+        // Subtract sidebar from window_size for calculation
+        uint32_t video_w = (window_size.width > SIDEBAR_WIDTH)
+                         ? window_size.width - SIDEBAR_WIDTH : window_size.width;
+        target_size.width = (uint32_t) video_w * target_size.width
                           / old_content_size.width;
         target_size.height = (uint32_t) window_size.height * target_size.height
                            / old_content_size.height;
     }
     target_size = get_optimal_size(target_size, new_content_size, true);
+    // Add sidebar back
+    target_size.width += SIDEBAR_WIDTH;
     assert(is_windowed(screen));
     set_aspect_ratio(screen, new_content_size);
     sc_sdl_set_window_size(screen->window, target_size);
@@ -851,12 +867,9 @@ set_content_size(struct sc_screen *screen, struct sc_size new_content_size,
         if (is_windowed(screen)) {
             resize_for_content(screen, screen->content_size, new_content_size);
         } else if (screen->flex_display) {
-            // Force a display resize, the client cannot resize in fullscreen
             struct sc_size size = sc_sdl_get_window_size(screen->window);
             sc_screen_request_resize_display(screen, size.width, size.height);
         } else if (!screen->resize_pending) {
-            // Store the windowed size to be able to compute the optimal size
-            // once fullscreen/maximized/minimized are disabled
             screen->windowed_content_size = screen->content_size;
             screen->resize_pending = true;
         }
@@ -910,7 +923,6 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     if (screen->frame_size.width != new_frame_size.width
             || screen->frame_size.height != new_frame_size.height) {
 
-        // frame dimension changed
         screen->frame_size = new_frame_size;
 
         struct sc_size new_content_size =
@@ -956,7 +968,6 @@ sc_screen_update_frame(struct sc_screen *screen) {
     av_frame_unref(screen->frame);
     sc_mutex_lock(&screen->mutex);
     sc_frame_buffer_consume(&screen->fb, screen->frame);
-    // read with lock held
     bool can_resize = !screen->prevent_auto_resize;
     sc_mutex_unlock(&screen->mutex);
     return sc_screen_apply_frame(screen, can_resize);
@@ -967,13 +978,10 @@ sc_screen_set_paused(struct sc_screen *screen, bool paused) {
     assert(screen->video);
 
     if (!paused && !screen->paused) {
-        // nothing to do
         return;
     }
 
     if (screen->paused && screen->resume_frame) {
-        // If display screen was paused, refresh the frame immediately, even if
-        // the new state is also paused.
         av_frame_free(&screen->frame);
         screen->frame = screen->resume_frame;
         screen->resume_frame = NULL;
@@ -1019,7 +1027,6 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
     }
 
     if (screen->render_fit == SC_RENDER_FIT_STRETCHED) {
-        // nothing to do
         return;
     }
 
@@ -1027,8 +1034,12 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
 
     if (screen->render_fit == SC_RENDER_FIT_UNSCALED) {
         struct sc_size content_size = screen->content_size;
+        struct sc_size new_size = {
+            .width = content_size.width + SIDEBAR_WIDTH,
+            .height = content_size.height,
+        };
         set_aspect_ratio(screen, content_size);
-        sc_sdl_set_window_size(screen->window, content_size);
+        sc_sdl_set_window_size(screen->window, new_size);
 
         int32_t x_offset = 0;
         if (content_size.width < window_size.width) {
@@ -1055,10 +1066,16 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
 
     struct sc_point point = sc_sdl_get_window_position(screen->window);
 
+    // For optimal size calculation, use video area only
+    struct sc_size video_area = {
+        .width = (window_size.width > SIDEBAR_WIDTH)
+               ? window_size.width - SIDEBAR_WIDTH : window_size.width,
+        .height = window_size.height,
+    };
     struct sc_size optimal_size =
-        get_optimal_size(window_size, screen->content_size, false);
+        get_optimal_size(video_area, screen->content_size, false);
+    optimal_size.width += SIDEBAR_WIDTH;
 
-    // Center the window related to the device screen
     assert(optimal_size.width <= window_size.width);
     assert(optimal_size.height <= window_size.height);
 
@@ -1083,8 +1100,12 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
     }
 
     struct sc_size content_size = screen->content_size;
+    struct sc_size new_size = {
+        .width = content_size.width + SIDEBAR_WIDTH,
+        .height = content_size.height,
+    };
     set_aspect_ratio(screen, content_size);
-    sc_sdl_set_window_size(screen->window, content_size);
+    sc_sdl_set_window_size(screen->window, new_size);
     LOGD("Resized to pixel-perfect: %ux%u", content_size.width,
                                             content_size.height);
 }
@@ -1107,7 +1128,7 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
     (void) userdata;
 
     bool ok = sc_push_event(SC_EVENT_DISCONNECTED_TIMEOUT);
-    (void) ok; // ignore failure
+    (void) ok;
 }
 
 void
@@ -1117,7 +1138,6 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             sc_screen_show_initial_window(screen);
 
             if (sc_screen_is_relative_mode(screen)) {
-                // Capture mouse on start
                 sc_mouse_capture_set_active(&screen->mc, true);
             }
 
@@ -1133,7 +1153,6 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         case SDL_EVENT_WINDOW_EXPOSED:
             sc_screen_render(screen, true);
             return;
-// If defined, then the actions are already performed by the event watcher
 #ifndef CONTINUOUS_RESIZING_WORKAROUND
         case SDL_EVENT_WINDOW_RESIZED:
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -1158,11 +1177,24 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
                 sc_screen_render(screen, true);
             }
             return;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+            // Check if click is in sidebar area
+            struct sc_size win = sc_sdl_get_window_size(screen->window);
+            int sidebar_x = (int) win.width - SIDEBAR_WIDTH;
+            if (event->button.x >= sidebar_x && screen->video
+                    && !screen->disconnected) {
+                int btn = sc_sidebar_get_button_at(&screen->sidebar,
+                                                   event->button.x,
+                                                   event->button.y);
+                sc_screen_sidebar_click(screen, btn);
+                return; // consumed
+            }
+            break;
+        }
         case SC_EVENT_DEVICE_DISCONNECTED:
             assert(!screen->disconnected);
             screen->disconnected = true;
             if (!screen->window_shown) {
-                // No window open
                 return;
             }
 
@@ -1187,7 +1219,6 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
 
     if (sc_screen_is_relative_mode(screen)
             && sc_mouse_capture_handle_event(&screen->mc, event)) {
-        // The mouse capture handler consumed the event
         return;
     }
 
@@ -1197,12 +1228,10 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
 void
 sc_screen_handle_disconnection(struct sc_screen *screen) {
     if (!screen->window_shown) {
-        // No window open, quit immediately
         return;
     }
 
     if (!screen->disconnect_started) {
-        // If sc_disconnect_start() failed, quit immediately
         return;
     }
 
@@ -1223,7 +1252,6 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
                     screen->content_size.height = icon_disconnected->h;
                     sc_screen_render(screen, true);
                 } else {
-                    // not fatal
                     LOGE("Could not set disconnected icon");
                 }
 
@@ -1253,7 +1281,6 @@ sc_screen_convert_window_to_frame_coords(struct sc_screen *screen,
     int32_t w = screen->content_size.width;
     int32_t h = screen->content_size.height;
 
-    // screen->rect must be initialized to avoid a division by zero
     assert(screen->rect.w && screen->rect.h);
 
     x = (int64_t) (x - screen->rect.x) * w / screen->rect.w;
