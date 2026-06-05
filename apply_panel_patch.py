@@ -334,6 +334,7 @@ def patch_screen_c():
 
     # ── Render hook ───────────────────────────────────────────────────────────
     render_anchors = [
+        'sc_sdl_render_present(renderer);',
         'SDL_RenderPresent(display->renderer);',
         'SDL_RenderPresent(screen->display.renderer);',
         'SDL_RenderPresent(renderer);',
