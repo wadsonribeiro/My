@@ -27,27 +27,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
             meson ninja-build pkg-config \
-            python3 git wget unzip \
-            libsdl2-dev libavcodec-dev libavformat-dev \
-            libavutil-dev libswresample-dev libavdevice-dev \
-            libusb-1.0-0-dev
+            python3 git wget unzip
 
-      - name: Download prebuilt Windows deps (SDL2, FFmpeg, SDL2_ttf)
+      - name: Download prebuilt Windows deps (SDL3, FFmpeg)
         run: |
           mkdir -p win-deps
           cd win-deps
 
-          # SDL2
-          wget -q https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-devel-2.30.3-mingw.tar.gz
-          tar xf SDL2-devel-2.30.3-mingw.tar.gz
-          mv SDL2-2.30.3/x86_64-w64-mingw32 SDL2
+          # SDL3
+          wget -q https://github.com/libsdl-org/SDL/releases/download/release-3.2.14/SDL3-devel-3.2.14-mingw.tar.gz
+          tar xf SDL3-devel-3.2.14-mingw.tar.gz
+          mv SDL3-3.2.14/x86_64-w64-mingw32 SDL3
 
-          # SDL2_ttf
-          wget -q https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-devel-2.22.0-mingw.tar.gz
-          tar xf SDL2_ttf-devel-2.22.0-mingw.tar.gz
-          mv SDL2_ttf-2.22.0/x86_64-w64-mingw32 SDL2_ttf
-
-          # FFmpeg (shiftmedia build)
+          # FFmpeg (BtbN build - win64 shared)
           wget -q "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
           unzip -q ffmpeg-master-latest-win64-gpl-shared.zip
           mv ffmpeg-master-latest-win64-gpl-shared FFmpeg
@@ -74,21 +66,25 @@ jobs:
           cpu        = 'x86_64'
           endian     = 'little'
 
+          [built-in options]
+          c_args   = ['-I${DEPS}/SDL3/include', '-I${DEPS}/FFmpeg/include']
+          c_link_args = ['-L${DEPS}/SDL3/lib', '-L${DEPS}/FFmpeg/lib']
+
           [properties]
-          sys_root       = '${DEPS}'
-          pkg_config_libdir = '${DEPS}/SDL2/lib/pkgconfig:${DEPS}/SDL2_ttf/lib/pkgconfig'
-          c_args   = ['-I${DEPS}/SDL2/include', '-I${DEPS}/SDL2_ttf/include',
-                      '-I${DEPS}/FFmpeg/include']
-          c_link_args = ['-L${DEPS}/SDL2/lib', '-L${DEPS}/SDL2_ttf/lib',
-                         '-L${DEPS}/FFmpeg/lib']
+          pkg_config_libdir = '${DEPS}/SDL3/lib/pkgconfig'
           EOF
 
       - name: Configure (meson)
         run: |
+          export PKG_CONFIG_PATH="$PWD/win-deps/SDL3/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$PWD/win-deps/SDL3/lib/pkgconfig"
           meson setup build-win \
             --cross-file cross_win64_ci.txt \
             --buildtype=release \
-            -Db_lto=false
+            -Db_lto=false \
+            -Dcompile_server=false \
+            -Dc_args="-I$PWD/win-deps/SDL3/include -I$PWD/win-deps/FFmpeg/include" \
+            -Dc_link_args="-L$PWD/win-deps/SDL3/lib -L$PWD/win-deps/FFmpeg/lib -lSDL3 -lavformat -lavcodec -lavutil -lswresample"
 
       - name: Build
         run: |
@@ -100,9 +96,7 @@ jobs:
           DEPS=$PWD/win-deps
           mkdir -p release-win
           cp build-win/app/scrcpy.exe         release-win/ 2>/dev/null || true
-          cp build-win/app/scrcpy-server      release-win/ 2>/dev/null || true
-          cp "$DEPS/SDL2/bin/SDL2.dll"         release-win/
-          cp "$DEPS/SDL2_ttf/bin/SDL2_ttf.dll" release-win/
+          cp "$DEPS/SDL3/bin/SDL3.dll"         release-win/
           cp "$DEPS/FFmpeg/bin/"*.dll          release-win/
           echo '{}' > release-win/devices_data.json
           mkdir -p release-win/Prints
@@ -119,7 +113,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   build-linux:
     name: Linux x64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -130,7 +124,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             gcc meson ninja-build pkg-config \
-            libsdl2-dev libsdl2-ttf-dev \
+            libsdl3-dev \
             libavcodec-dev libavformat-dev \
             libavutil-dev libswresample-dev libavdevice-dev \
             libusb-1.0-0-dev libv4l-dev \
@@ -143,7 +137,8 @@ jobs:
         run: |
           meson setup build-linux \
             --buildtype=release \
-            -Db_lto=true
+            -Db_lto=true \
+            -Dcompile_server=false
 
       - name: Build
         run: |
@@ -154,7 +149,6 @@ jobs:
         run: |
           mkdir -p release-linux
           cp build-linux/app/scrcpy    release-linux/
-          cp build-linux/app/scrcpy-server release-linux/ 2>/dev/null || true
           echo '{}' > release-linux/devices_data.json
           mkdir -p release-linux/Prints
 
@@ -197,9 +191,6 @@ jobs:
             - 🔉 Controle de volume do celular
             - ← Botões de navegação (Back, Home, Recents)
             - ⚙️ Configurações salvas por dispositivo (`devices_data.json`)
-              - FPS: 30 / 60 / 120 / 240
-              - Resolução: 540p / 720p / 1080p / 1440p
-              - Bitrate: 4M / 8M / 16M / 32M
 
             ### Como usar
             Coloque `devices_data.json` e a pasta `Prints/` na mesma pasta do executável.
