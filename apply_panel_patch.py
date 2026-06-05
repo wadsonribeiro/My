@@ -396,31 +396,40 @@ def patch_input_manager_c():
 # 5. Patch meson.build — add new source files
 # ─────────────────────────────────────────────────────────────────────────────
 
-NEW_SOURCES = """\
-    'app/src/panel/device_config.c',
-    'app/src/panel/side_panel.c',
-    'app/src/panel/settings_dialog.c',
+NEW_SOURCES_APP = """\
+    'src/panel/device_config.c',
+    'src/panel/side_panel.c',
+    'src/panel/settings_dialog.c',
 """
 
 def patch_meson_build():
-    path = 'meson.build'
+    # The real sources list is in app/meson.build, not meson.build
+    path = os.path.join('app', 'meson.build')
     c = read(path)
-    # Find the sources list and add our files before the closing bracket
-    # Look for 'app/src/screen.c' as anchor
-    anchor = "'app/src/screen.c',"
-    if NEW_SOURCES.strip() in c:
-        print(f"  SKIP   meson.build (already patched)")
-        return
-    c = patch_once(c, anchor, '\n' + NEW_SOURCES)
 
-    # Add SDL2_ttf to dependencies if not present
-    if 'sdl2_ttf' not in c and 'SDL2_ttf' not in c:
-        # Try to add after sdl2 dep declaration
-        c = patch_once(c, "dependency('sdl2'",
-                       "\nsdl2_ttf_dep = dependency('SDL2_ttf', required: false)", after=False)
-        c = patch_once(c, "sdl2_dep,", "\n    sdl2_ttf_dep,")
+    if NEW_SOURCES_APP.strip() in c:
+        print(f"  SKIP   app/meson.build (already patched)")
+    else:
+        # anchor is 'src/screen.c', (without app/ prefix since path is relative inside app/)
+        anchor = "'src/screen.c',"
+        c = patch_once(c, anchor, '\n' + NEW_SOURCES_APP)
+        write(path, c)
 
-    write(path, c)
+    # Also check root meson.build for SDL2_ttf dependency
+    root_path = 'meson.build'
+    root_c = read(root_path)
+    changed = False
+    if 'sdl2_ttf' not in root_c and 'SDL2_ttf' not in root_c:
+        app_meson = os.path.join('app', 'meson.build')
+        app_c = read(app_meson)
+        if 'sdl2_ttf' not in app_c and 'SDL2_ttf' not in app_c:
+            try:
+                app_c = patch_once(app_c, "dependency('sdl2'",
+                           "\nsdl2_ttf_dep = dependency('SDL2_ttf', required: false)", after=False)
+                app_c = patch_once(app_c, "sdl2_dep,", "\n    sdl2_ttf_dep,")
+                write(app_meson, app_c)
+            except ValueError:
+                print("  SKIP   SDL2_ttf dep (anchor not found, skipping)")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
