@@ -70,6 +70,12 @@ def copy_panel_files():
         if not os.path.exists(src):
             print(f"  SKIP   {fname} (source not found in {PANEL_SRC})")
             continue
+        # Skip if src and dst resolve to the same file (script is inside the repo)
+        src_abs = os.path.abspath(src)
+        dst_abs = os.path.abspath(dst)
+        if src_abs == dst_abs:
+            print(f"  SKIP   {fname} (already in place)")
+            continue
         shutil.copy2(src, dst)
         print(f"  COPY   {dst}")
 
