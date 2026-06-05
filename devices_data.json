@@ -1,0 +1,22 @@
+{
+  "8a20a960": {
+    "_modelo": "M2102J20SG",
+    "name": "POCO",
+    "wifi_serial": "192.168.18.61:9990",
+    "fps": "60",
+    "res": "1080",
+    "bitrate": "8M",
+    "audio": true,
+    "console": false
+  },
+  "RQ8N308S9YV": {
+    "_modelo": "SM G980F",
+    "name": "Samsung S20",
+    "wifi_serial": "192.168.18.165:9990",
+    "fps": "60",
+    "res": "1080",
+    "bitrate": "8M",
+    "audio": true,
+    "console": false
+  }
+}
