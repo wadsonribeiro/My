@@ -1,0 +1,215 @@
+--- a/app/src/screen.h
++++ b/app/src/screen.h
+@@ -18,6 +18,9 @@
+ #include "display.h"
+ #include "fps_counter.h"
+ #include "input_manager.h"
++#include "panel/side_panel.h"
++#include "panel/settings_dialog.h"
++#include "panel/device_config.h"
+
+ #define SC_DISPLAY_MARGINS 0
+
+@@ -61,6 +64,12 @@ struct sc_screen {
+     bool mipmaps;
+
+     struct sc_input_manager im;
++
++    /* ---- Side panel & settings ---- */
++    sc_side_panel       side_panel;
++    sc_settings_dialog  settings_dialog;
++    sc_device_config    device_cfg;
++    bool                restart_requested;
++    char                restart_cmd[512];
+ };
+
+--- a/app/src/screen.c
++++ b/app/src/screen.c
+@@ -1,6 +1,7 @@
+ #include "screen.h"
+
+ #include <assert.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <SDL2/SDL.h>
+ #include <SDL2/SDL_ttf.h>
+@@ -20,6 +21,9 @@
+ #include "icon.h"
+ #include "util/log.h"
+ #include "version.h"
++#include "panel/side_panel.h"
++#include "panel/settings_dialog.h"
++#include "panel/device_config.h"
+
+ #define DISPLAY_MARGINS 0
+@@ -27,6 +31,116 @@
+
+ #define SC_WINDOW_TITLE "scrcpy"
+
++/* =========================================================================
++ * Side-panel callbacks
++ * ========================================================================= */
++
++static void
++panel_screenshot(void *userdata) {
++    struct sc_screen *screen = userdata;
++    (void)screen;
++
++    /* Get executable directory for Prints/ folder */
++    char prints_dir[512];
++#ifdef _WIN32
++    char exe[MAX_PATH];
++    GetModuleFileNameA(NULL, exe, MAX_PATH);
++    PathRemoveFileSpecA(exe);
++    snprintf(prints_dir, sizeof(prints_dir), "%s\\Prints", exe);
++    CreateDirectoryA(prints_dir, NULL);
++    char cmd[768];
++    char ts[64];
++    SYSTEMTIME st; GetLocalTime(&st);
++    snprintf(ts, sizeof(ts), "%04d%02d%02d_%02d%02d%02d",
++             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
++    snprintf(cmd, sizeof(cmd),
++             "adb -s %s exec-out screencap -p > \"%s\\print_%s.png\"",
++             screen->device_cfg.device_id, prints_dir, ts);
++    system(cmd);
++    LOGI("Screenshot saved to %s\\print_%s.png", prints_dir, ts);
++#else
++    char exe[PATH_MAX];
++    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe)-1);
++    if (n > 0) { exe[n]='\0'; dirname(exe); }
++    snprintf(prints_dir, sizeof(prints_dir), "%s/Prints", dirname(exe));
++    mkdir(prints_dir, 0755);
++    struct timespec tp; clock_gettime(CLOCK_REALTIME, &tp);
++    char cmd[768];
++    snprintf(cmd, sizeof(cmd),
++             "adb -s %s exec-out screencap -p > \"%s/print_%ld.png\"",
++             screen->device_cfg.device_id, prints_dir, tp.tv_sec);
++    system(cmd);
++    LOGI("Screenshot saved to %s", prints_dir);
++#endif
++}
++
++static void
++panel_audio_toggle(void *userdata, bool *audio_on) {
++    struct sc_screen *screen = userdata;
++    screen->device_cfg.audio = *audio_on;
++    LOGI("Audio forwarding to PC: %s", *audio_on ? "ON" : "OFF");
++    /* Queue a restart so scrcpy reconnects with/without --no-audio */
++    screen->restart_requested = true;
++    sc_device_config_build_cmd(&screen->device_cfg,
++                               screen->restart_cmd,
++                               sizeof(screen->restart_cmd));
++}
++
++static void
++panel_volume(void *userdata, int delta) {
++    struct sc_screen *screen = userdata;
++    char cmd[256];
++    /* KEYCODE_VOLUME_UP=24, KEYCODE_VOLUME_DOWN=25 */
++    int key = (delta > 0) ? 24 : 25;
++    snprintf(cmd, sizeof(cmd),
++             "adb -s %s shell input keyevent %d",
++             screen->device_cfg.device_id, key);
++    system(cmd);
++}
++
++static void
++panel_nav(void *userdata, sp_button_id btn) {
++    struct sc_screen *screen = userdata;
++    int keycode = 0;
++    switch (btn) {
++        case SP_BTN_BACK:    keycode = 4;  break;  /* KEYCODE_BACK    */
++        case SP_BTN_HOME:    keycode = 3;  break;  /* KEYCODE_HOME    */
++        case SP_BTN_RECENTS: keycode = 187; break; /* KEYCODE_APP_SWITCH */
++        default: return;
++    }
++    char cmd[256];
++    snprintf(cmd, sizeof(cmd),
++             "adb -s %s shell input keyevent %d",
++             screen->device_cfg.device_id, keycode);
++    system(cmd);
++}
++
++static void
++panel_open_settings(void *userdata) {
++    struct sc_screen *screen = userdata;
++    sc_settings_dialog_show(&screen->settings_dialog);
++}
++
++static void
++settings_save_restart(void *userdata, const sc_device_config *new_cfg) {
++    struct sc_screen *screen = userdata;
++    /* Build new command and signal restart */
++    sc_device_config_build_cmd(new_cfg,
++                               screen->restart_cmd,
++                               sizeof(screen->restart_cmd));
++    screen->restart_requested = true;
++    LOGI("Restart requested with: %s", screen->restart_cmd);
++    /* Actual restart is handled in scrcpy.c event loop */
++}
++
++/* =========================================================================
++ * Panel init helper — called after sc_screen_init
++ * ========================================================================= */
++static bool
++sc_screen_init_panel(struct sc_screen *screen,
++                     const char *device_serial) {
++    /* Load (or default) device config */
++    sc_device_config_load(&screen->device_cfg, device_serial);
++
++    /* Try to init SDL_ttf for labels */
++    TTF_Font *font = NULL;
++    if (TTF_WasInit() || TTF_Init() == 0) {
++        /* Try common system fonts */
++        const char *font_paths[] = {
++#ifdef _WIN32
++            "C:\\Windows\\Fonts\\segoeui.ttf",
++            "C:\\Windows\\Fonts\\arial.ttf",
++#elif defined(__APPLE__)
++            "/System/Library/Fonts/SFNSText.ttf",
++            "/System/Library/Fonts/Helvetica.dfont",
++#else
++            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
++            "/usr/share/fonts/TTF/DejaVuSans.ttf",
++            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
++#endif
++            NULL
++        };
++        for (int i = 0; font_paths[i] && !font; i++)
++            font = TTF_OpenFont(font_paths[i], 13);
++        if (!font) LOGW("SDL_ttf: no system font found — panel labels disabled");
++    }
+
++    sc_side_panel_params sp_params = {
++        .renderer       = screen->display.renderer,
++        .font           = font,
++        .device_cfg     = &screen->device_cfg,
++        .on_screenshot  = panel_screenshot,
++        .on_audio_toggle= panel_audio_toggle,
++        .on_volume      = panel_volume,
++        .on_nav         = panel_nav,
++        .on_settings    = panel_open_settings,
++        .userdata       = screen,
++    };
++    if (!sc_side_panel_init(&screen->side_panel, &sp_params)) {
++        LOGE("Failed to init side panel");
++        return false;
++    }
+
++    sc_settings_dialog_params sd_params = {
++        .renderer        = screen->display.renderer,
++        .font            = font,
++        .font_bold       = font,
++        .device_cfg      = &screen->device_cfg,
++        .on_save_restart = settings_save_restart,
++        .userdata        = screen,
++    };
++    if (!sc_settings_dialog_init(&screen->settings_dialog, &sd_params)) {
++        LOGE("Failed to init settings dialog");
++        return false;
++    }
+
++    screen->restart_requested = false;
++    screen->restart_cmd[0]    = '\0';
++    return true;
++}

@@ -1,0 +1,30 @@
+--- a/app/src/screen.c (render & event hooks)
++++ b/app/src/screen.c
+
+@@ sc_screen_render (adicionar logo após SDL_RenderPresent) @@
+
+ /* PATCH: render side panel overlay on top of every frame */
+ static void
+ sc_screen_render_panel_overlay(struct sc_screen *screen) {
+     int w, h;
+     SDL_GetWindowSize(screen->window, &w, &h);
+     sc_side_panel_update(&screen->side_panel, w, h);
+     sc_side_panel_render(&screen->side_panel);
+     if (screen->settings_dialog.visible) {
+         sc_settings_dialog_render(&screen->settings_dialog, w, h);
+     }
+ }
+
+@@ sc_screen_handle_event (adicionar no início, antes do switch) @@
+
+ /* PATCH: let settings dialog consume event first */
+ static bool
+ sc_screen_panel_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+     int w, h;
+     SDL_GetWindowSize(screen->window, &w, &h);
+     if (screen->settings_dialog.visible) {
+         return sc_settings_dialog_handle_event(
+             &screen->settings_dialog, event, w, h);
+     }
+     return sc_side_panel_handle_event(&screen->side_panel, event);
+ }
